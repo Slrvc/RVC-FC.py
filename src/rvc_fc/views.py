@@ -10,8 +10,8 @@ if TYPE_CHECKING:
 
 # Create your views here.
 def home(request: HttpRequest):
-    return render(request, "rvcfc/home.html", context={
+    return render(request, "rvcfc/pages/home.html", context={
         "title": "RVC-FC (Home)",
-        "description": "Seja bem-vindo ao RVC-FC.",
-        "name": "RVC FC"
+        "description": "Controle de Produção | Florestal | Carvão",
+        "name": "RVC-FC"
     })

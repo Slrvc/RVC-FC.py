@@ -1,0 +1,34 @@
+<header class="main-header-container">
+  <div class="main-header container-left">
+    <h1>            
+      <a class="main-logo-link" href="/">
+        <i class="fa-solid fa-fire-burner main-logo-icon"></i>
+        <span class="main-logo-content">
+          <span class="main-logo-text">{{ name }}</span>
+          <span class="main-logo-description">{{ description }}</span>
+        </span>           
+      </a>
+    </h1>
+  </div>
+  <div class="main-header container-right">
+    <!--{% if user.is_authenticated %}-->
+      <div class="user-info">
+        <i class="fa-solid fa-circle-user user-icon"></i>
+        <span class="user-name">
+          Usuário: 
+          <!--{{ user.get_full_name|default:user.username }}-->
+        </span>
+      </div>
+      <form method="post" action="">
+        {% csrf_token %}
+        <button type="submit" class="btn-auth">
+          <i class="fa-solid fa-right-from-bracket"></i> Sair
+        </button>
+      </form>
+    <!--{% else %}-->
+      <a class="btn-auth" href="">
+        <i class="fa-solid fa-right-to-bracket"></i> Entrar
+      </a>
+    <!--{% endif %}-->
+  </div>
+</header>
