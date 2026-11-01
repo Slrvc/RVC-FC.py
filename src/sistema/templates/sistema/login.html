@@ -1,0 +1,41 @@
+{% extends "sistema/base.html" %}
+{% block title %}Entrar · RVC-FC{% endblock %}
+{% block public_content %}
+  <main class="auth-page">
+    <section class="auth-brand-panel" aria-label="Sobre o RVC-FC">
+      <a class="brand" href="{% url 'login' %}">
+        <span class="brand-mark" aria-hidden="true">R</span>
+        <span><strong>RVC-FC</strong><small>Gestão florestal</small></span>
+      </a>
+      <div class="auth-brand-copy">
+        <p class="eyebrow">Gestão conectada</p>
+        <h1>Informação organizada para uma operação melhor.</h1>
+        <p>Gerencie unidades, usuários e cadastros de fazendas em um ambiente centralizado e seguro.</p>
+      </div>
+      <div class="auth-footnote">Acesso exclusivo a usuários autorizados.</div>
+    </section>
+    <section class="auth-form-side">
+      <div class="auth-card">
+        <a class="brand" href="{% url 'login' %}" aria-label="RVC-FC">
+          <span class="brand-mark" aria-hidden="true">R</span>
+          <span><strong>RVC-FC</strong><small>Gestão florestal</small></span>
+        </a>
+        <h2>Acesse sua conta</h2>
+        <p>Entre com o usuário e a senha fornecidos pelo administrador.</p>
+        <form class="auth-form" method="post">
+          {% csrf_token %}
+          {% if form.non_field_errors %}<div class="error-list" role="alert">{{ form.non_field_errors }}</div>{% endif %}
+          {% for field in form %}
+            <div class="field">
+              <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {{ field }}
+              {% for error in field.errors %}<span class="error-text" role="alert">{{ error }}</span>{% endfor %}
+            </div>
+          {% endfor %}
+          <input type="hidden" name="next" value="{{ next }}">
+          <div class="form-actions"><button class="button" type="submit">Entrar no sistema <span aria-hidden="true">→</span></button></div>
+        </form>
+      </div>
+    </section>
+  </main>
+{% endblock %}

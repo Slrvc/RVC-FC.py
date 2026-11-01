@@ -1,0 +1,248 @@
+
+Projeto: Aplicativo de controle de Colheita Florestal de Floresta de Eucalipto ou similares
+Sistema colheita Florestal
+Para dar vida para esse Sistema, precisamos de uma série de cadastro, operações, quantitativos e várias informações para gerar um acompanhamento mais assertivo possível para a colheita.
+Vou tentar ser o mais objetivo possível, mais quero que me ajude com mais informações e detalhes que por acaso fuja do meu conhecimento.
+Gostaria que pesquisasse na internet informações que possam nós auxiliar para execução desse projeto.
+
+Cadastros
+	Cadastro do proprietário (Pessoa Jurídica ou Pessoa Física)
+		Nome, 
+CPF ou CNPJ, 
+endereço completo.
+ (consultar na internet cadastros semelhantes para completar o banco de dados)
+
+	Cadastro da propriedade;
+		Nome da propriedade, 
+proprietário (Cadastro do proprietário), 
+endereço completo, 
+área da fazenda em hectares, 
+área de plantio efetivo em hectares, 
+número de matrícula e mais informações que se façam necessárias. (consultar na internet cadastros semelhantes para completar o banco de dados)
+	
+	Cadastro do plantio;
+		Propriedade (Cadastro da propriedade), 
+nome, 
+área de plantio efetivo em hectares, 
+localização geográfica, 
+número de talhão, 
+volume estimado do plantio. 
+(consultar na internet cadastros semelhantes para completar o banco de dados)
+
+	Cadastro de Talhões;
+		Plantio (Cadastro do plantio), 
+número (Alfa numérico), 
+tamanho do talhão em hectares, 
+Volume estimado e efetivo em Metro cúbico (m³) e metro estéreo, localização geográfica, 
+ciclo do plantio (1º, 2º, 3º ou mais cortes), 
+clone ou semente (se clone - material genético, se semente – espécie, gerar cadastro de espécies e clones comerciais do mercado, verificar na internet), 
+Inventariado – SIM ou NÃO, se sim relacionar cadastro de inventario.
+(consultar na internet cadastros semelhantes para completar o banco de dados)
+
+	Cadastro de Inventário
+		Proprietário (Cadastro do proprietário), 
+Propriedade (Cadastro da propriedade),
+Requerente (Pessoa ou empresa que solicitou o Inventario) – gerar um cadastro e/ou solicitar informações de outro cadastro, 
+Elaborador – gerar um cadastro para o engenheiro que elaborou o inventario, 
+Executor (Pessoa ou empresa que solicitou o Inventario) – gerar um cadastro e/ou solicitar informações de outro cadastro, 
+Talhões (pode ser um talhão ou vários talhões de um ou mais plantios – Cadastro de plantio e cadastro de Talhões), 
+Área inventariada separada por cada talhão (hectares), 
+área total inventariada, 
+Espécie, 
+Nº de Talhões, 
+Espaçamento (por talhão), 
+N°. Árvores por hectare, 
+Nº. total de Árvores, 
+Vol. m³/hectare, 
+Vol. Total (m³), 
+Vol. estéreo/hectare, 
+Vol. Total (estéreo), 
+Data Levantamento, 
+Nº Amostras (parcelas), 
+Idade Média Plantio (anos), 
+Volume Total (m³), 
+Volume Total (Estéreo), 
+Erro Amostragem (%). 
+(consultar na internet cadastros semelhantes para completar o banco de dados)
+
+Cadastro de Empresa (proprietária do aplicativo)
+	Todas as informações que precisamos para emitir nota fiscal em caso de necessidade.
+ 
+Cadastro de empresas terceirizadas.
+		Empresa, 
+CNPJ, 
+tipo de serviço (Serviços que se enquadram na colheita florestal, exp. Colheita, inventários, terraplanagem..., faça uma pesquisa na internet, para mais serviços relacionados), 
+endereço completo, 
+valor do serviço (caso for colheita o valor pode ser subdividido por operação – Corte, Arraste e Traçamento, sendo que o traçamento deve ser subdividido pelo comprimento da tora – comprimento 1, 2, 3..., os demais serviços relacionados pelos valores de cobrança tradicionais), 
+prazo de execução, 
+data inicial da operação, 
+data de final da operação, 
+Valor total do contrato de serviços. 
+(consultar na internet cadastros semelhantes para completar o banco de dados)
+
+	Cadastro de equipamentos e colaboradores
+		Nome, 
+modelo, 
+marca..., 
+como estamos tratando de colheita florestal, temos que identificar o tipo de operação se será colheita manual ou colheita mecanizada, caso seja manual, teremos que cadastrar operador de motosserra, ajudantes, se for mecanizada, teremos que cadastrar operadores de máquina (Feler ou Havester, Skidder, Garra traçadora), mecânico de máquinas pesadas, caminhão comboio de manutenção de. (consultar na internet cadastros semelhantes para completar o banco de dados)
+
+Esses são os cadastros que analisei e acho pertinentes, caso tenha mais informações que possa nos ajudar que o aplicativo fique mais completo, peço que insira, te dou autorização para fazê-lo.
+
+Agora vamos identificar e implementar as operações de colheita.
+
+Identificando as informações de cadastro de inventario, plantios e talhões, vamos relacionar cada operação com seus controles de produção, custos, pagamentos.
+
+Após essas definições, precisamos definir o tipo de colheita, própria ou terceirizada.
+
+Caso seja própria, vamos priorizar os custos de cada operação, volumes de madeira colhidos, corte, arraste e traçamento.
+	Custos:
+		O Corte, realizado pelo Feller, consiste em fazer a derrubada das arvores, nessa operação vemos controlar os custos com combustível, mão de obra, manutenção, peças, e demais que se faça necessário. (consultar na internet informações semelhantes para completar o levantamento de custos)
+As informações anteriores vão gerar o valor de custo que teremos por metro cúbico de madeira derrubada. Para chegarmos a esse valor, precisamos saber em qual talhão esse equipamento realiza essa operação, pegar o volume inventariado, e contabilizar a quantidade de hectares que houve a derrubada de arvores.
+Ex.: O referido talhão contabiliza 4.818,75 m³ no total do inventario, como o talhão possui 15 hectares, temos um volume de 321,25 m³ por hectare de madeira, sabendo que na operação até o momento foram derrubados 7 hectares, consideramos para pagamento um volume de 2.248,75 m³ de madeira.
+Esse exemplo nos mostra a possibilidade de automatizar esse cálculo via drone, poderia ver essa possibilidade?		
+
+		O Arraste, realizado pelo Skidder, consiste em arrastar as arvores que foram derrubadas na operação anterior, para as extremidades do talhão para melhor armazenamento da madeira e facilitar a próxima operação.
+Nessa operação utilizaremos as premissas de levantamento de custos da operação anterior “Corte”.
+
+		O traçamento, realizado pela Garra Traçadora, consiste em cortar a madeira que foi arrastada na operação anterior, e empilhá-la na margem da estrada que circunda o talhão, facilitando o carregamento e transporte posterior.
+O tamanho do comprimento da tora pode ser definido no cadastro, no início ou no decorrer da operação (gostaria de colocar autorização para tal mudança caso já tenha um tamanho definido, pelo líder de campo). 
+Nessa operação utilizaremos as premissas de levantamento de custos da operação anterior “Arraste”, sendo que o volume em m³ será identificado por medição via fita métrica ou app de medição existente no mercado.
+
+Relatórios
+Relatório individual para cada operação com custos para operação própria e para acerto de operações terceirizadas.
+
+Relatório de andamento das operações de modo completo por talhão e totalizando o total da floresta.
+
+Relatório de custos por operação, e operações.
+
+Gráficos de evolução comprando comprazo estipulado para colheita.
+
+Dashboard com as principais informações das operações em tempo real, comparando com os volumes e prazos definidos, custos e tempo evolução, previsão de conclusão. 
+
+Depois de terminar essa primeira etapa, gostaria de desenvolver uns outros sistemas integrados a esse de colheita, mais que tenha distinção e acesso separado em uma tela de entrada, Exemplo, no acesso ao Aplicativo, definir qual sistema o usuário em questão pode ter acesso.
+
+Sistema de Colheita Florestal
+Sistema de Transporte de Lenha
+Sistema de Produção de Carvão
+Sistema de Estoque de Carvão
+Sistema de Expedição de Carvão
+
+Tratando da sequência dos sistemas, vou detalhar e conto com sua ajuda para deixar o sistema mais completo, vou tratar do transporte de Lenha
+
+Sistema de Transporte de Lenha
+
+Nesse sistema poderemos ter transporte próprio ou terceirizado.
+
+No próprio vamos ter o cadastro de colaboradores, veículos, máquinas de carregamento e descarga, e o que mais precisar para controles de custo com mão de obra, combustíveis. Alimentação, alojamento, impostos etc.
+
+No terceirizado vamos ter o cadastro de empresas terceirizadas de transporte, carregamento, descarregamento, seguindo o mesmo escopo da colheita.
+
+Mais na terceirização temos que ter o valor de cada operação: 
+Transporte, valor em metro cúbico, metro estéreo, e com a opção de tonelada; 
+Carregamento, valor em metro cúbico, metro estéreo, e com a opção de tonelada; 
+Descarregamento: valor em metro cúbico, metro estéreo, e com a opção de tonelada; 
+
+No transporte gostaria de controlar as seguintes operações.
+
+	Carregamento de Lenha
+		No carregamento vamos liberar o transporte, cadastrando (imprimir um ticket caso não haja internet) placa caminhão e empresa proprietária, local de carregamento (Plantio e Talhão), distância prevista, data e hora, quando chegar no local do carregamento cadastrar o equipamento de carregamento e empresa proprietária, dados do transportador, validação do local de carregamento, data e hora, tempo de carregamento), liberação de retorno para descarga. (Peço que me ajude com a organização dessa operação, seguindo uma lógica mais correta) saliento que caso não haja confecção com a internet, possamos atualizar o a base de dados posteriormente, com informações que já não estejam pré-cadastrados.
+  
+	Descarregamento
+		No descarregamento, quando o caminhão chegar do carregamento, vamos realizar a medição da carga, em metro cúbico, metro estéreo, e com a opção de tonelada, depois de realizar a medição vamos liberara a descarga definindo o local descarregamento, estoque ou box de forno (o box referisse ao estoque imediato de cada forno que faremos o cadastro no sistema de produção de carvão, juntamente com o controle de estoque.
+
+Obs.: A medição, subdividimos o caminhão em pacotes, exemplo um caminhão truck pode transportar para uma lenha de 3.5 metros de comprimento 2 pacotes, se a lenha for de 2.5 metros de comprimento 3 pacotes, e se for de 1.7 metros 4 ou 5 pacotes.
+Assim medimos 2 ou 3 pontos de altura do pacote, largura e comprimento do pacote.
+Na altura fazemos a média dos pontos e multiplicamos pela largura e comprimento, obtendo o valor/volume em MST metro estéreo.
+
+Nesse pondo de medição gostaria que o usuário determinasse o número de pacotes de cada caminhão, mas o número de pontos de altura será determinado por configuração.
+
+Também teremos a opção de fazer a medida por aplicativos de terceiros.
+
+Todas essas operações teremos de fazer relatório de produção, pagamentos em caso de terceirizadas, e fazendo uma relação entre os sistemas, volume retirado e volume restante de cada talhão/plantio.
+
+Dashboard com as principais informações das operações em tempo real, comparando com os volumes e prazos definidos, custos e tempo evolução, previsão de conclusão. 
+
+Sistema de Produção de Carvão
+
+Como nos outros sistemas podemos ter a produção própria e terceirizada.
+Na produção própria vamos fazer vários controles e cadastros.
+
+Cadastro de colaboradores, veículos, máquinas de carregamento e descarga de forno caso seja sistema mecanizado, e o que mais precisar para controles de custo com mão de obra, combustíveis. Alimentação, alojamento, impostos etc.
+
+Cadastro de UPC (Unidade de Produção de Carvão): 
+Nome da UPC, 
+endereço (Logradouro, bairro, município etc.)
+
+Cadastro da Praça de fornos: 
+UPC (Cadastro de UPC), 
+Quantidade de fornos, 
+tipo de fornos (Circular (Diâmetro, Altura de camisa, e copa), 
+Retangular (Comprimento, Altura da camisa, e copa)), 
+localização geográfica, 
+capacidade produtiva por forno e total da praça (de a cordo com o tamanho de cada forno, considerando que cada 1,4 m³ (valor pode ser configurável individualmente e automático) equivale a 1 MDC (Metro de Carvão)). 
+(Gostaria que pesquisasse na internet cadastros e situações semelhantes para completar e ajustar esse cadastro. Uma praça pode ter vários tipos de fornos.)
+
+Cadastro de fornos: 
+Pode ser gerado automaticamente com as informações do cadastro da praça de fornos, incluindo os campos do cadastro da praça de fornos, Tipo de forno, tamanha do forno, capacidade produtiva do forno (cálculo de acordo com as medidas- MDC); 
+Novos campos: 
+número do forno (Gerado automaticamente com a letra F de forno, inicial do tipo de forno (Circular C / Retangular R), e inicial da empresa dona do empreendimento mais o número sequencial, exp.: FRM-01 (Forno Retangular da empresa Minas Agroflorestal - número 01), 
+quantidade de ciclos de produção (O Ciclo de produção referisse ao tempo que cada forno gasta para produzir carvão, podemos dizer que um forno tem um tempo médio de ciclo de oito dias, fazendo em torno de 3 ciclos mensais), 
+total real produzido (MDC), 
+ranque de produtividade entre os fornos. 
+(Gostaria que pesquisasse na internet cadastros e situações semelhantes para completar e ajustar esse cadastro. Uma praça pode ter vários tipos de fornos.)
+
+Cadastro de Box: 
+cada Box referisse a um forno, podendo usar a mesma numeração dos fornos substituindo as letras por B e seguido os números, 
+Data de descarga,
+Data de enchimento,
+Volume total,
+Volume restante. 
+(Gostaria que pesquisasse na internet cadastros e situações semelhantes para completar e ajustar esse cadastro)
+
+
+No terceirizado vamos ter o cadastro de empresas terceirizadas de produção, com valor por MDC produzido e calcularemos o pagamento pela quantidade de metros de carvão no mês.
+
+Os controles:
+	Queria controlar o tempo de carregamento de cada fornos, 
+Ciclo do forno (
+saber em que estágio o forno está: 
+	
+
+
+			
+			L – Lenha: forno está carregado mais não foi iniciado a carbonização.
+			C – Carbonização: foi dado a ignição no forno (Colocou fogo na lenha) para iniciar a pirolise.
+			R – Resfriamento: Todas as entradas de ar do forno foram fechadas para encerrar a pirolise e resfriar o carvão.
+			D – Descarga: esvaziar o forno, colocar o carvão no estoque
+			V – Vazio: o forno passou o dia vazio, contabilizado em tempo, horas e dia.
+			M – Manutenção: forno em processo de reparo ou conserto.
+		Sabendo o tempo de cada uma dessas etapas podemos contabilizar a produção atual (RE – Real) e estimar/planejar uma produção futura (PL – Planejamento).
+		Podemos identificar a performasse individual de cada forno, volume individual produzido.
+		Pode-se ter varia informação para um controle mais completo.
+
+(Gostaria que pesquisasse na internet formas de controles e situações semelhantes para completar e ajustar esse controle de ciclo)
+ Vou anexa 2 planilhas para análise do ciclo e formatação de relatórios de produção:
+09 - Relatório de Produção UPC Mata Verde_FGMG_Bio.xlsx
+PLANILHA CICLO UPC MATA VERDE SETEMBRO-23.xlsx
+
+Todas essas operações teremos de fazer relatório de produção, pagamentos em caso de terceirizadas, e fazendo uma relação entre os sistemas, volume retirado e volume restante de cada talhão/plantio.
+
+Dashboard com as principais informações das operações em tempo real, comparando com os volumes e prazos definidos, custos e tempo evolução, previsão de conclusão. 
+
+Sistema de Estoque de Carvão
+
+Quando descarregamos cada forno, através do volume descarregado, geramos um estoque num local definido na praça de fornos.
+Vamos precisar contar os fornos descarregados somando eles para gerar um volume de estoque, assim autorizado via sistema a expedição do carvão, e também atualizando em tempo real o Dashboard já sugerido. 
+
+Sistema de Expedição de Carvão
+
+	Nesse sistema vamos controlar o faturamento da carvoaria, com o cadastro da carga expedida.
+
+	Vou anexar uma planilha para retirar os dados necessários para desenvolver os relatórios.
+	Controle Faturamento Mato Grosso do Sul-Maio.xlsx
+
+Gostaria que seja desenhado inteiramente para Web com funcionalidades offline, com posterior atualização de banco, em aparelhos Android e IOs e similares.
+
+Controle de acesso de telas de acordo com a operação, e liderança no processo.
+
+Tendo sugestões para poder melhorar esse aplicativo podemos discutir e implementar neste prompt de instrução para desenvolvimento.

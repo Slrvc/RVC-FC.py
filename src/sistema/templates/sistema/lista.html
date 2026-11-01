@@ -1,0 +1,64 @@
+{% extends "sistema/base.html" %}
+{% block title %}{{ titulo }} · RVC-FC{% endblock %}
+{% block content %}
+  <div class="page-heading">
+    <div>
+      <p class="eyebrow">Cadastros</p>
+      <h1>{{ titulo }}</h1>
+      <p class="page-description">Consulte e mantenha os registros do sistema.</p>
+    </div>
+    <a class="button" href="{% url 'novo_registro' recurso %}"><span aria-hidden="true">＋</span> Novo cadastro</a>
+  </div>
+  <section class="panel" aria-label="Lista de {{ titulo|lower }}">
+    <div class="list-toolbar">
+      <form class="search-form" method="get" role="search">
+        <label class="sr-only" for="busca-registros">Buscar em {{ titulo|lower }}</label>
+        <input class="search-input" id="busca-registros" type="search" name="q" value="{{ termo }}" placeholder="Buscar por nome, código ou cidade">
+        <button class="button button-secondary" type="submit">Buscar</button>
+      </form>
+      <p class="result-count">
+        {% if termo %}{{ pagina.paginator.count }} resultado{{ pagina.paginator.count|pluralize }} para “{{ termo }}”
+        {% else %}{{ pagina.paginator.count }} registro{{ pagina.paginator.count|pluralize }}{% endif %}
+      </p>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>{% for coluna in colunas %}<th scope="col">{{ coluna }}</th>{% endfor %}<th scope="col">Ação</th></tr>
+        </thead>
+        <tbody>
+          {% for linha in linhas %}
+            <tr>
+              {% for valor in linha.valores %}<td>{{ valor|default:"—" }}</td>{% endfor %}
+              <td><a class="table-action" href="{% url 'editar_registro' recurso linha.objeto.pk %}">Editar</a></td>
+            </tr>
+          {% empty %}
+            <tr>
+              <td class="empty-state" colspan="20">
+                <strong>{% if termo %}Nenhum resultado encontrado{% else %}Ainda não há registros{% endif %}</strong>
+                <p>{% if termo %}Tente buscar por outro termo.{% else %}Use “Novo cadastro” para adicionar o primeiro registro.{% endif %}</p>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if pagina.has_other_pages %}
+      <nav class="pagination" aria-label="Paginação">
+        <span class="pagination-summary">Página {{ pagina.number }} de {{ pagina.paginator.num_pages }}</span>
+        <div class="pagination-links">
+          {% if pagina.has_previous %}
+            <a class="page-link" href="?{% if termo %}q={{ termo|urlencode }}&amp;{% endif %}page={{ pagina.previous_page_number }}" aria-label="Página anterior">← Anterior</a>
+          {% else %}
+            <span class="page-link is-disabled" aria-hidden="true">← Anterior</span>
+          {% endif %}
+          {% if pagina.has_next %}
+            <a class="page-link" href="?{% if termo %}q={{ termo|urlencode }}&amp;{% endif %}page={{ pagina.next_page_number }}" aria-label="Próxima página">Próxima →</a>
+          {% else %}
+            <span class="page-link is-disabled" aria-hidden="true">Próxima →</span>
+          {% endif %}
+        </div>
+      </nav>
+    {% endif %}
+  </section>
+{% endblock %}

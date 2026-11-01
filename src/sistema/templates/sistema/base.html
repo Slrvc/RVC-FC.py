@@ -1,0 +1,74 @@
+{% load static %}
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#153d2b">
+    <title>{% block title %}RVC-FC{% endblock %}</title>
+    <link rel="stylesheet" href="{% static 'sistema/app.css' %}">
+  </head>
+  <body>
+    {% if request.user.is_authenticated %}
+      <header class="topbar">
+        <a class="brand" href="{% url 'inicio' %}" aria-label="RVC-FC, início">
+          <span class="brand-mark" aria-hidden="true">R</span>
+          <span><strong>RVC-FC</strong><small>Gestão florestal</small></span>
+        </a>
+        <div class="topbar-user">
+          <div class="user-details">
+            <strong>{{ request.user.nome_completo|default:request.user.username }}</strong>
+            <span>{% if request.user.is_superuser or request.user.tipo_usuario == "admin" %}Administrador{% else %}Gestor da unidade{% endif %}</span>
+          </div>
+          <form method="post" action="{% url 'logout' %}">
+            {% csrf_token %}
+            <button class="button button-quiet" type="submit">Sair</button>
+          </form>
+        </div>
+      </header>
+      <div class="app-shell">
+        <aside class="sidebar">
+          <div class="sidebar-label">Menu principal</div>
+          <nav aria-label="Navegação principal">
+            <a class="nav-link{% if request.resolver_match.url_name == 'inicio' %} is-active{% endif %}" href="{% url 'inicio' %}">
+              <span class="nav-icon" aria-hidden="true">⌂</span> Visão geral
+            </a>
+            <div class="sidebar-label">Cadastros</div>
+            {% if request.user.is_superuser or request.user.tipo_usuario == "admin" %}
+              <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'empresas' %} is-active{% endif %}" href="{% url 'lista_registros' 'empresas' %}"><span class="nav-icon" aria-hidden="true">▦</span> Empresas</a>
+              <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'usuarios' %} is-active{% endif %}" href="{% url 'lista_registros' 'usuarios' %}"><span class="nav-icon" aria-hidden="true">♙</span> Usuários</a>
+              <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'parametros' %} is-active{% endif %}" href="{% url 'lista_registros' 'parametros' %}"><span class="nav-icon" aria-hidden="true">⚙</span> Parâmetros</a>
+            {% endif %}
+            <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'fazendas' %} is-active{% endif %}" href="{% url 'lista_registros' 'fazendas' %}"><span class="nav-icon" aria-hidden="true">⌖</span> Fazendas</a>
+            {% if request.user.is_superuser or request.user.tipo_usuario == "admin" %}
+              <div class="sidebar-label">Localidades e IBGE</div>
+              <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'estados' %} is-active{% endif %}" href="{% url 'lista_registros' 'estados' %}"><span class="nav-icon" aria-hidden="true">◇</span> Estados</a>
+              <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'cidades' %} is-active{% endif %}" href="{% url 'lista_registros' 'cidades' %}"><span class="nav-icon" aria-hidden="true">⌖</span> Cidades</a>
+              <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'codigos-ibge' %} is-active{% endif %}" href="{% url 'lista_registros' 'codigos-ibge' %}"><span class="nav-icon" aria-hidden="true">#</span> Códigos IBGE</a>
+            {% endif %}
+            <div class="sidebar-label">Conta</div>
+            <a class="nav-link{% if request.resolver_match.url_name == 'password_change' %} is-active{% endif %}" href="{% url 'password_change' %}"><span class="nav-icon" aria-hidden="true">♧</span> Alterar senha</a>
+          </nav>
+          {% if empresa %}
+            <div class="sidebar-unit">
+              <span class="unit-indicator" aria-hidden="true"></span>
+              <div><small>Unidade ativa</small><strong>{{ empresa }}</strong></div>
+            </div>
+          {% endif %}
+        </aside>
+        <main class="main-content">
+          <div class="content-wrap">
+            {% for message in messages %}
+              <div class="flash-message" role="status">{{ message }}</div>
+            {% endfor %}
+            {% block content %}{% endblock %}
+          </div>
+          <footer class="footer">RVC-FC <span aria-hidden="true">·</span> Gestão florestal</footer>
+        </main>
+      </div>
+    {% else %}
+      {% block public_content %}{% endblock %}
+    {% endif %}
+    <script src="{% static 'sistema/app.js' %}" defer></script>
+  </body>
+</html>

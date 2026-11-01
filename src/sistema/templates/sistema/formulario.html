@@ -1,0 +1,36 @@
+{% extends "sistema/base.html" %}
+{% block title %}{% if novo %}Novo{% else %}Editar{% endif %} · {{ titulo }} · RVC-FC{% endblock %}
+{% block content %}
+  <div class="page-heading">
+    <div>
+      <p class="eyebrow"><a href="{% url 'lista_registros' recurso %}">{{ titulo }}</a></p>
+      <h1>{% if novo %}Novo cadastro{% else %}Editar cadastro{% endif %}</h1>
+      <p class="page-description">Preencha as informações abaixo para {% if novo %}adicionar um registro{% else %}atualizar este registro{% endif %}.</p>
+    </div>
+  </div>
+  <form class="panel form-panel" method="post" data-cidades-url="{% url 'cidades_por_estado' %}">
+    {% csrf_token %}
+    {% if formulario.non_field_errors %}<div class="error-list" role="alert">{{ formulario.non_field_errors }}</div>{% endif %}
+    {% for secao in formulario.secoes %}
+      <fieldset class="form-section">
+        <legend>{{ secao.titulo }}</legend>
+        {% if secao.descricao %}<p class="form-section-description">{{ secao.descricao }}</p>{% endif %}
+        <div class="form-grid">
+          {% for field in secao.campos %}
+            <div class="field{% if field.field.widget.input_type == 'checkbox' %} field-checkbox{% endif %}">
+              <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {{ field }}
+              {% if field.help_text %}<span class="help-text">{{ field.help_text }}</span>{% endif %}
+              {% for error in field.errors %}<span class="error-text" role="alert">{{ error }}</span>{% endfor %}
+              {% if field.name == "cidade" %}<span class="field-status" id="cidade-status" aria-live="polite"></span>{% endif %}
+            </div>
+          {% endfor %}
+        </div>
+      </fieldset>
+    {% endfor %}
+    <div class="form-actions">
+      <button class="button" type="submit">{% if novo %}Salvar cadastro{% else %}Salvar alterações{% endif %}</button>
+      <a class="button button-secondary" href="{% url 'lista_registros' recurso %}">Cancelar</a>
+    </div>
+  </form>
+{% endblock %}

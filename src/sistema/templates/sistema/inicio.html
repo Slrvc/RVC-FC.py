@@ -1,0 +1,137 @@
+{% extends "sistema/base.html" %}
+{% block title %}Visão geral · RVC-FC{% endblock %}
+{% block content %}
+  <section class="welcome-panel">
+    <div class="welcome-copy">
+      <p class="eyebrow">Painel de gestão</p>
+      <h1>Olá, {{ request.user.nome_completo|default:request.user.username }}</h1>
+      {% if empresa %}
+        <p>Acompanhe os cadastros e as informações de <strong>{{ empresa }}</strong> em um só lugar.</p>
+      {% elif administrador %}
+        <p>Gerencie empresas, usuários, fazendas e os dados de referência do sistema.</p>
+      {% else %}
+        <p>Sua conta ainda não está vinculada a uma unidade. Fale com o administrador do sistema.</p>
+      {% endif %}
+    </div>
+    {% if primeira_empresa %}
+      <a class="button" href="{% url 'novo_registro' 'empresas' %}">Cadastrar primeira empresa <span aria-hidden="true">→</span></a>
+    {% else %}
+      <a class="button" href="{% url 'lista_registros' 'fazendas' %}">Acessar fazendas <span aria-hidden="true">→</span></a>
+    {% endif %}
+  </section>
+
+  {% if primeira_empresa %}
+    <section class="setup-panel" aria-labelledby="setup-heading">
+      <div class="setup-icon" aria-hidden="true">1</div>
+      <div class="setup-copy">
+        <p class="eyebrow">Primeiro passo</p>
+        <h2 id="setup-heading">Comece cadastrando sua empresa</h2>
+        <p>Os cadastros de gestores, parâmetros e fazendas dependem de uma empresa/unidade. Depois de salvá-la, esses acessos ficam disponíveis no menu.</p>
+      </div>
+      <a class="button" href="{% url 'novo_registro' 'empresas' %}">Abrir cadastro da empresa <span aria-hidden="true">→</span></a>
+    </section>
+  {% endif %}
+
+  <section aria-labelledby="resumo-heading">
+    <div class="section-heading">
+      <div>
+        <h2 id="resumo-heading">Resumo do sistema</h2>
+        <p>Registros disponíveis para sua conta</p>
+      </div>
+    </div>
+    <div class="metric-grid">
+      {% if administrador %}
+        <article class="metric-card">
+          <div class="metric-label">Empresas <span class="metric-mark" aria-hidden="true">E</span></div>
+          <strong class="metric-value">{{ resumo.empresas }}</strong>
+          <span class="metric-note">Unidades cadastradas</span>
+        </article>
+        <article class="metric-card">
+          <div class="metric-label">Usuários ativos <span class="metric-mark" aria-hidden="true">U</span></div>
+          <strong class="metric-value">{{ resumo.usuarios }}</strong>
+          <span class="metric-note">Acessos habilitados</span>
+        </article>
+      {% endif %}
+      <article class="metric-card">
+        <div class="metric-label">Fazendas <span class="metric-mark" aria-hidden="true">F</span></div>
+        <strong class="metric-value">{{ resumo.fazendas }}</strong>
+        <span class="metric-note">{% if administrador %}Em todas as unidades{% else %}Da sua unidade{% endif %}</span>
+      </article>
+      <article class="metric-card">
+        <div class="metric-label">Fornecedores <span class="metric-mark" aria-hidden="true">M</span></div>
+        <strong class="metric-value">{{ resumo.fornecedores }}</strong>
+        <span class="metric-note">Inclui relações combinadas</span>
+      </article>
+      <article class="metric-card">
+        <div class="metric-label">Locatários <span class="metric-mark" aria-hidden="true">L</span></div>
+        <strong class="metric-value">{{ resumo.locatarios }}</strong>
+        <span class="metric-note">Inclui relações combinadas</span>
+      </article>
+      {% if administrador %}
+        <article class="metric-card">
+          <div class="metric-label">Estados <span class="metric-mark" aria-hidden="true">UF</span></div>
+          <strong class="metric-value">{{ resumo.estados }}</strong>
+          <span class="metric-note">Unidades da federação</span>
+        </article>
+        <article class="metric-card">
+          <div class="metric-label">Cidades <span class="metric-mark" aria-hidden="true">C</span></div>
+          <strong class="metric-value">{{ resumo.cidades }}</strong>
+          <span class="metric-note">Localidades disponíveis</span>
+        </article>
+        <article class="metric-card">
+          <div class="metric-label">Códigos IBGE <span class="metric-mark" aria-hidden="true">IBGE</span></div>
+          <strong class="metric-value">{{ resumo.codigos_ibge }}</strong>
+          <span class="metric-note">Referências importadas</span>
+        </article>
+      {% endif %}
+    </div>
+  </section>
+
+  <section aria-labelledby="atalhos-heading">
+    <div class="section-heading">
+      <div>
+        <h2 id="atalhos-heading">{% if administrador %}Criar novo cadastro{% else %}Acessos rápidos{% endif %}</h2>
+        <p>{% if administrador %}Abra diretamente os formulários de cadastro{% else %}Acesse as fazendas da sua unidade{% endif %}</p>
+      </div>
+    </div>
+    <div class="shortcut-grid">
+      {% if administrador %}
+        <a class="shortcut-card" href="{% url 'novo_registro' 'empresas' %}">
+          <span class="shortcut-icon" aria-hidden="true">E</span>
+          <span><h3>Empresa</h3><p>Cadastre uma unidade e seu endereço.</p></span><span class="shortcut-arrow" aria-hidden="true">＋</span>
+        </a>
+        {% if resumo.empresas %}
+          <a class="shortcut-card" href="{% url 'novo_registro' 'usuarios' %}">
+            <span class="shortcut-icon" aria-hidden="true">U</span>
+            <span><h3>Gestor</h3><p>Crie um acesso vinculado a uma empresa.</p></span><span class="shortcut-arrow" aria-hidden="true">＋</span>
+          </a>
+          <a class="shortcut-card" href="{% url 'novo_registro' 'parametros' %}">
+            <span class="shortcut-icon" aria-hidden="true">P</span>
+            <span><h3>Parâmetros</h3><p>Configure idioma, formatos e precisão.</p></span><span class="shortcut-arrow" aria-hidden="true">＋</span>
+          </a>
+          <a class="shortcut-card" href="{% url 'novo_registro' 'fazendas' %}">
+            <span class="shortcut-icon" aria-hidden="true">F</span>
+            <span><h3>Fazenda</h3><p>Cadastre fornecedores e locatários de áreas.</p></span><span class="shortcut-arrow" aria-hidden="true">＋</span>
+          </a>
+        {% endif %}
+        <a class="shortcut-card" href="{% url 'novo_registro' 'estados' %}">
+          <span class="shortcut-icon" aria-hidden="true">UF</span>
+          <span><h3>Estado</h3><p>Adicione uma unidade da federação.</p></span><span class="shortcut-arrow" aria-hidden="true">＋</span>
+        </a>
+        <a class="shortcut-card" href="{% url 'novo_registro' 'cidades' %}">
+          <span class="shortcut-icon" aria-hidden="true">L</span>
+          <span><h3>Cidade</h3><p>Adicione um município a um estado.</p></span><span class="shortcut-arrow" aria-hidden="true">＋</span>
+        </a>
+        <a class="shortcut-card" href="{% url 'novo_registro' 'codigos-ibge' %}">
+          <span class="shortcut-icon" aria-hidden="true">#</span>
+          <span><h3>Código IBGE</h3><p>Cadastre uma referência de município.</p></span><span class="shortcut-arrow" aria-hidden="true">＋</span>
+        </a>
+      {% else %}
+        <a class="shortcut-card" href="{% url 'novo_registro' 'fazendas' %}">
+          <span class="shortcut-icon" aria-hidden="true">F</span>
+          <span><h3>Fazenda</h3><p>Cadastre fornecedores e locatários de áreas.</p></span><span class="shortcut-arrow" aria-hidden="true">＋</span>
+        </a>
+      {% endif %}
+    </div>
+  </section>
+{% endblock %}
