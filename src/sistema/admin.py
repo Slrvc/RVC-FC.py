@@ -10,9 +10,22 @@ class UsuarioAdmin(UserAdmin):
     list_filter = ("tipo_usuario", "is_active", "is_superuser")
     fieldsets = (
         *UserAdmin.fieldsets,
-        ("Sistema", {"fields": ("nome_completo", "tipo_usuario", "empresa", "primeiro_acesso")}),
+        (
+            "Sistema",
+            {
+                "fields": (
+                    "nome_completo",
+                    "tipo_usuario",
+                    "empresa",
+                    "primeiro_acesso",
+                )
+            },
+        ),
     )
     add_fieldsets = (
         *UserAdmin.add_fieldsets,
-        ("Sistema", {"fields": ("nome_completo", "email", "tipo_usuario", "empresa")}),
+        (
+            "Sistema",
+            {"fields": ("nome_completo", "email", "tipo_usuario", "empresa")},
+        ),
     )

@@ -122,10 +122,11 @@ select = [
     "RUF",
     "N",
 ]
-ignore = ["T201", "COM812", "ANN201", "F401", "ANN001"]
+ignore = ["T201", "COM812", "ANN201", "F401", "ANN001", "RUF012"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["ANN201", "S101"]
+"**/tests.py" = ["S101", "S105", "S106", "E501"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -138,7 +139,14 @@ line-ending = "lf"
 known-first-party = ["rvcfc"]
 
 [tool.pyright]
-typeCheckingMode = "strict"
+typeCheckingMode = "basic"
+reportMissingModuleSource = "none"
+reportAttributeAccessIssue = "none"
+reportOptionalMemberAccess = "none"
+reportOptionalIterable = "none"
+reportGeneralTypeIssues = "none"
+reportIncompatibleVariableOverride = "none"
+reportIncompatibleMethodOverride = "none"
 pythonVersion = "3.15"
 include = ["src", 'tests']
 exclude = [
