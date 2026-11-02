@@ -19,6 +19,9 @@
           <div class="user-details">
             <strong>{{ request.user.nome_completo|default:request.user.username }}</strong>
             <span>{% if request.user.is_superuser or request.user.tipo_usuario == "admin" %}Administrador{% else %}Gestor da unidade{% endif %}</span>
+            {% if request.user.empresa %}
+              <span>{{ request.user.empresa.razao_social }} · {% if upc_ativa %}UPC {{ upc_ativa.nome }}{% else %}{% for upc in request.user.upcs.all %}{{ upc.nome }}{% if not forloop.last %}, {% endif %}{% empty %}Todas as UPCs{% endfor %}{% endif %}</span>
+            {% endif %}
           </div>
           <form method="post" action="{% url 'logout' %}">
             {% csrf_token %}
@@ -39,20 +42,49 @@
               <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'usuarios' %} is-active{% endif %}" href="{% url 'lista_registros' 'usuarios' %}"><span class="nav-icon" aria-hidden="true">♙</span> Usuários</a>
               <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'parametros' %} is-active{% endif %}" href="{% url 'lista_registros' 'parametros' %}"><span class="nav-icon" aria-hidden="true">⚙</span> Parâmetros</a>
             {% endif %}
+            <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'proprietarios' %} is-active{% endif %}" href="{% url 'lista_registros' 'proprietarios' %}"><span class="nav-icon" aria-hidden="true">♟</span> Proprietários</a>
             <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'fazendas' %} is-active{% endif %}" href="{% url 'lista_registros' 'fazendas' %}"><span class="nav-icon" aria-hidden="true">⌖</span> Fazendas</a>
+            <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'plantios' %} is-active{% endif %}" href="{% url 'lista_registros' 'plantios' %}"><span class="nav-icon" aria-hidden="true">❦</span> Plantios</a>
+            <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'talhoes' %} is-active{% endif %}" href="{% url 'lista_registros' 'talhoes' %}"><span class="nav-icon" aria-hidden="true">▤</span> Talhões</a>
+            <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'upcs' %} is-active{% endif %}" href="{% url 'lista_registros' 'upcs' %}"><span class="nav-icon" aria-hidden="true">♨</span> UPCs</a>
+            <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'inventarios' %} is-active{% endif %}" href="{% url 'lista_registros' 'inventarios' %}"><span class="nav-icon" aria-hidden="true">≣</span> Inventários</a>
+            <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'inventarios-talhao' %} is-active{% endif %}" href="{% url 'lista_registros' 'inventarios-talhao' %}"><span class="nav-icon" aria-hidden="true">▦</span> Inventário por talhão</a>
+            <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'autorizacoes' %} is-active{% endif %}" href="{% url 'lista_registros' 'autorizacoes' %}"><span class="nav-icon" aria-hidden="true">✔</span> Autorizações</a>
+            <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'expedicoes' %} is-active{% endif %}" href="{% url 'lista_registros' 'expedicoes' %}"><span class="nav-icon" aria-hidden="true">⇢</span> Expedições</a>
+            <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'transportes-lenha' %} is-active{% endif %}" href="{% url 'lista_registros' 'transportes-lenha' %}"><span class="nav-icon" aria-hidden="true">⛟</span> Transporte de lenha</a>
+            <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'colheitas' %} is-active{% endif %}" href="{% url 'lista_registros' 'colheitas' %}"><span class="nav-icon" aria-hidden="true">✂</span> Colheitas</a>
+            <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'fornecedores' %} is-active{% endif %}" href="{% url 'lista_registros' 'fornecedores' %}"><span class="nav-icon" aria-hidden="true">⇄</span> Fornecedores</a>
+            <div class="sidebar-label">Custos</div>
+            <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'producoes-carvao' %} is-active{% endif %}" href="{% url 'lista_registros' 'producoes-carvao' %}"><span class="nav-icon" aria-hidden="true">▦</span> Produção de carvão</a>
+            <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'lancamentos-custo' %} is-active{% endif %}" href="{% url 'lista_registros' 'lancamentos-custo' %}"><span class="nav-icon" aria-hidden="true">$</span> Lançamentos de custo</a>
+            <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'rateios-custo' %} is-active{% endif %}" href="{% url 'lista_registros' 'rateios-custo' %}"><span class="nav-icon" aria-hidden="true">%</span> Rateios de custo</a>
+            <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'centros-custo' %} is-active{% endif %}" href="{% url 'lista_registros' 'centros-custo' %}"><span class="nav-icon" aria-hidden="true">◎</span> Centros de custo</a>
+            <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'categorias-custo' %} is-active{% endif %}" href="{% url 'lista_registros' 'categorias-custo' %}"><span class="nav-icon" aria-hidden="true">≡</span> Categorias de custo</a>
+            <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'equipamentos' %} is-active{% endif %}" href="{% url 'lista_registros' 'equipamentos' %}"><span class="nav-icon" aria-hidden="true">⚙</span> Equipamentos</a>
+            <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'clientes' %} is-active{% endif %}" href="{% url 'lista_registros' 'clientes' %}"><span class="nav-icon" aria-hidden="true">☰</span> Clientes</a>
             {% if request.user.is_superuser or request.user.tipo_usuario == "admin" %}
               <div class="sidebar-label">Localidades e IBGE</div>
               <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'estados' %} is-active{% endif %}" href="{% url 'lista_registros' 'estados' %}"><span class="nav-icon" aria-hidden="true">◇</span> Estados</a>
-              <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'cidades' %} is-active{% endif %}" href="{% url 'lista_registros' 'cidades' %}"><span class="nav-icon" aria-hidden="true">⌖</span> Cidades</a>
-              <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'codigos-ibge' %} is-active{% endif %}" href="{% url 'lista_registros' 'codigos-ibge' %}"><span class="nav-icon" aria-hidden="true">#</span> Códigos IBGE</a>
+              <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'municipios-ibge' %} is-active{% endif %}" href="{% url 'lista_registros' 'municipios-ibge' %}"><span class="nav-icon" aria-hidden="true">#</span> Municípios IBGE</a>
             {% endif %}
             <div class="sidebar-label">Conta</div>
             <a class="nav-link{% if request.resolver_match.url_name == 'password_change' %} is-active{% endif %}" href="{% url 'password_change' %}"><span class="nav-icon" aria-hidden="true">♧</span> Alterar senha</a>
           </nav>
-          {% if empresa %}
+          {% if usuario_admin or empresa_ativa %}
             <div class="sidebar-unit">
               <span class="unit-indicator" aria-hidden="true"></span>
-              <div><small>Unidade ativa</small><strong>{{ empresa }}</strong></div>
+              <div>
+                <small>{% if empresa_ativa %}Unidade ativa{% else %}Contexto de trabalho{% endif %}</small>
+                {% if empresa_ativa %}
+                  <strong>{{ empresa_ativa }}</strong>
+                {% else %}
+                  <strong>Nenhuma empresa selecionada</strong>
+                {% endif %}
+                {% if usuario_admin %}
+                  <a href="{% url 'selecionar_empresa' %}">{% if empresa_ativa %}Trocar empresa{% else %}Selecionar empresa{% endif %}</a>
+                {% endif %}
+                {% if upc_ativa %}<strong>UPC: {{ upc_ativa.nome }}</strong> <a href="{% url 'selecionar_upc' %}">Trocar</a>{% endif %}
+              </div>
             </div>
           {% endif %}
         </aside>
@@ -69,6 +101,6 @@
     {% else %}
       {% block public_content %}{% endblock %}
     {% endif %}
-    <script src="{% static 'sistema/app.js' %}" defer></script>
+    <script src="{% static 'sistema/app.js' %}?v=2" defer></script>
   </body>
 </html>

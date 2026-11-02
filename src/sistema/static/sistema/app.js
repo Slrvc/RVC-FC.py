@@ -1,18 +1,19 @@
-document.querySelectorAll("form[data-cidades-url]").forEach((form) => {
+document.querySelectorAll("form[data-municipios-url]").forEach((form) => {
   const estado = form.querySelector("#id_estado");
-  const cidade = form.querySelector("#id_cidade");
-  const status = form.querySelector("#cidade-status");
+  const municipio = form.querySelector("#id_municipio");
+  const status = form.querySelector("#municipio-status");
 
-  if (!estado || !cidade || !status) {
+  if (!estado || !municipio || !status) {
     return;
   }
 
   let requisicaoAtiva;
-  estado.addEventListener("change", async () => {
+  const carregarMunicipios = async () => {
     requisicaoAtiva?.abort();
+    const selecionado = municipio.value;
     if (!estado.value) {
-      cidade.replaceChildren(new Option("Selecione primeiro um estado", ""));
-      cidade.disabled = true;
+      municipio.replaceChildren(new Option("Selecione primeiro um estado", ""));
+      municipio.disabled = true;
       status.textContent = "";
       estado.removeAttribute("aria-busy");
       return;
@@ -20,41 +21,49 @@ document.querySelectorAll("form[data-cidades-url]").forEach((form) => {
 
     const controlador = new AbortController();
     requisicaoAtiva = controlador;
-    cidade.replaceChildren(new Option("Carregando cidades...", ""));
-    cidade.disabled = true;
-    status.textContent = "Carregando cidades...";
+    municipio.replaceChildren(new Option("Carregando municípios...", ""));
+    municipio.disabled = true;
+    status.textContent = "Carregando municípios...";
     estado.setAttribute("aria-busy", "true");
 
     try {
-      const url = new URL(form.dataset.cidadesUrl, window.location.origin);
+      const url = new URL(form.dataset.municipiosUrl, window.location.origin);
       url.searchParams.set("estado", estado.value);
       const resposta = await fetch(url, { signal: controlador.signal });
       const dados = await resposta.json();
       if (!resposta.ok) {
-        throw new Error(dados.erro || "Não foi possível carregar as cidades.");
+        throw new Error(dados.erro || "Não foi possível carregar os municípios.");
       }
 
-      cidade.replaceChildren(new Option("Selecione uma cidade", ""));
-      dados.cidades.forEach((item) => {
-        cidade.add(new Option(item.cidade, item.codigo));
+      municipio.replaceChildren(new Option("Selecione um município", ""));
+      dados.municipios.forEach((item) => {
+        municipio.add(new Option(`${item.nome} (${item.codigo})`, item.codigo));
       });
-      cidade.disabled = false;
-      if (dados.cidades.length === 0) {
-        status.textContent = "Não há cidades cadastradas para este estado.";
+      municipio.disabled = false;
+      if (selecionado) {
+        municipio.value = selecionado;
+      }
+      if (dados.municipios.length === 0) {
+        status.textContent = "Não há municípios sincronizados para este estado.";
       } else {
-        status.textContent = "Cidades carregadas. Escolha um município.";
+        status.textContent = "Municípios carregados. Escolha um município.";
       }
     } catch (erro) {
       if (controlador.signal.aborted) {
         return;
       }
-      cidade.replaceChildren(new Option("Cidades indisponíveis", ""));
-      status.textContent = "Não foi possível carregar as cidades. Tente novamente.";
-      console.error("Falha ao carregar cidades do estado selecionado.", erro);
+      municipio.replaceChildren(new Option("Municípios indisponíveis", ""));
+      status.textContent = "Não foi possível carregar os municípios. Tente novamente.";
+      console.error("Falha ao carregar municípios do estado selecionado.", erro);
     } finally {
       if (requisicaoAtiva === controlador) {
         estado.removeAttribute("aria-busy");
       }
     }
-  });
+  };
+
+  estado.addEventListener("change", carregarMunicipios);
+  if (estado.value && municipio.options.length <= 1) {
+    carregarMunicipios();
+  }
 });

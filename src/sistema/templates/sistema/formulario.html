@@ -8,7 +8,7 @@
       <p class="page-description">Preencha as informações abaixo para {% if novo %}adicionar um registro{% else %}atualizar este registro{% endif %}.</p>
     </div>
   </div>
-  <form class="panel form-panel" method="post" data-cidades-url="{% url 'cidades_por_estado' %}">
+  <form class="panel form-panel" method="post" data-municipios-url="{% url 'municipios_por_estado' %}">
     {% csrf_token %}
     {% if formulario.non_field_errors %}<div class="error-list" role="alert">{{ formulario.non_field_errors }}</div>{% endif %}
     {% for secao in formulario.secoes %}
@@ -18,11 +18,11 @@
         <div class="form-grid">
           {% for field in secao.campos %}
             <div class="field{% if field.field.widget.input_type == 'checkbox' %} field-checkbox{% endif %}">
-              <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+              <label for="{{ field.id_for_label }}">{{ field.label }}{% if field.field.atalho_url %} <a class="field-shortcut" href="{{ field.field.atalho_url }}">+ Cadastrar novo</a>{% endif %}</label>
               {{ field }}
               {% if field.help_text %}<span class="help-text">{{ field.help_text }}</span>{% endif %}
               {% for error in field.errors %}<span class="error-text" role="alert">{{ error }}</span>{% endfor %}
-              {% if field.name == "cidade" %}<span class="field-status" id="cidade-status" aria-live="polite"></span>{% endif %}
+              {% if field.name == "municipio" %}<span class="field-status" id="municipio-status" aria-live="polite"></span>{% endif %}
             </div>
           {% endfor %}
         </div>
@@ -31,6 +31,7 @@
     <div class="form-actions">
       <button class="button" type="submit">{% if novo %}Salvar cadastro{% else %}Salvar alterações{% endif %}</button>
       <a class="button button-secondary" href="{% url 'lista_registros' recurso %}">Cancelar</a>
+      {% if pode_excluir and not novo %}<a class="button button-danger form-actions-end" href="{% url 'excluir_registro' recurso pk %}">Excluir</a>{% endif %}
     </div>
   </form>
 {% endblock %}

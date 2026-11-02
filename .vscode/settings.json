@@ -90,5 +90,6 @@
   "python.testing.unittestEnabled": true,
   "editor.inlineSuggest.enabled": true,
   "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
-  "python-envs.defaultEnvManager": "ms-python.python:system"
+  "python-envs.defaultEnvManager": "ms-python.python:system",
+  "python.terminal.useEnvFile": true
 }

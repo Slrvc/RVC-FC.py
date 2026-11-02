@@ -1,0 +1,35 @@
+{% extends "sistema/base.html" %}
+{% block title %}Escolher UPC · RVC-FC{% endblock %}
+{% block content %}
+  <main class="auth-page">
+    <section class="auth-brand-panel" aria-label="Unidade de trabalho">
+      <a class="brand" href="{% url 'inicio' %}">
+        <span class="brand-mark" aria-hidden="true">R</span>
+        <span><strong>RVC-FC</strong><small>Gestão florestal</small></span>
+      </a>
+      <div class="auth-brand-copy">
+        <p class="eyebrow">Unidade de trabalho</p>
+        <h1>{{ empresa }}</h1>
+        <p>Todos os cadastros e consultas desta sessão ficam vinculados à empresa e à UPC escolhidas.</p>
+      </div>
+    </section>
+    <section class="auth-form-side">
+      <div class="auth-card">
+        <h2>Escolha a UPC</h2>
+        <p>Você pode trocar de UPC a qualquer momento pelo menu lateral.</p>
+        <form class="auth-form" method="post">
+          {% csrf_token %}
+          {% if proximo %}<input type="hidden" name="proximo" value="{{ proximo }}">{% endif %}
+          {% for field in formulario %}
+            <div class="field">
+              <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {{ field }}
+              {% for error in field.errors %}<span class="error-text" role="alert">{{ error }}</span>{% endfor %}
+            </div>
+          {% endfor %}
+          <div class="form-actions"><button class="button" type="submit">Entrar na UPC <span aria-hidden="true">→</span></button></div>
+        </form>
+      </div>
+    </section>
+  </main>
+{% endblock %}

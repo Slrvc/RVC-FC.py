@@ -607,6 +607,17 @@ tbody tr:last-child td {
   font-weight: 700;
   text-decoration: none;
 }
+.button-danger {
+  border-color: #b3261e;
+  background: #b3261e;
+  color: var(--white);
+}
+.button-danger:hover {
+  background: #8c1d18;
+}
+.form-actions-end {
+  margin-left: auto;
+}
 .empty-state {
   padding: 3rem 1rem;
   color: var(--ink-muted);
@@ -735,6 +746,12 @@ tbody tr:last-child td {
   height: 17px;
   accent-color: var(--green-700);
 }
+.field-shortcut {
+  font-size: 0.8rem;
+  font-weight: 600;
+  margin-left: 0.5rem;
+}
+
 .help-text {
   color: #849187;
   font-size: 0.74rem;

@@ -8,13 +8,15 @@
       {% if empresa %}
         <p>Acompanhe os cadastros e as informações de <strong>{{ empresa }}</strong> em um só lugar.</p>
       {% elif administrador %}
-        <p>Gerencie empresas, usuários, fazendas e os dados de referência do sistema.</p>
+        <p>Gerencie empresas, usuários, fazendas e os dados de referência do sistema. Escolha uma empresa para abrir seus cadastros.</p>
       {% else %}
         <p>Sua conta ainda não está vinculada a uma unidade. Fale com o administrador do sistema.</p>
       {% endif %}
     </div>
     {% if primeira_empresa %}
       <a class="button" href="{% url 'novo_registro' 'empresas' %}">Cadastrar primeira empresa <span aria-hidden="true">→</span></a>
+    {% elif administrador and not empresa %}
+      <a class="button" href="{% url 'selecionar_empresa' %}">Selecionar empresa <span aria-hidden="true">→</span></a>
     {% else %}
       <a class="button" href="{% url 'lista_registros' 'fazendas' %}">Acessar fazendas <span aria-hidden="true">→</span></a>
     {% endif %}
@@ -58,14 +60,54 @@
         <span class="metric-note">{% if administrador %}Em todas as unidades{% else %}Da sua unidade{% endif %}</span>
       </article>
       <article class="metric-card">
-        <div class="metric-label">Fornecedores <span class="metric-mark" aria-hidden="true">M</span></div>
-        <strong class="metric-value">{{ resumo.fornecedores }}</strong>
-        <span class="metric-note">Inclui relações combinadas</span>
+        <div class="metric-label">Proprietários <span class="metric-mark" aria-hidden="true">P</span></div>
+        <strong class="metric-value">{{ resumo.proprietarios }}</strong>
+        <span class="metric-note">{% if administrador %}Em todas as unidades{% else %}Da sua unidade{% endif %}</span>
       </article>
       <article class="metric-card">
-        <div class="metric-label">Locatários <span class="metric-mark" aria-hidden="true">L</span></div>
-        <strong class="metric-value">{{ resumo.locatarios }}</strong>
-        <span class="metric-note">Inclui relações combinadas</span>
+        <div class="metric-label">Fornecedores <span class="metric-mark" aria-hidden="true">FN</span></div>
+        <strong class="metric-value">{{ resumo.fornecedores }}</strong>
+        <span class="metric-note">Serviços, produtos e locação</span>
+      </article>
+      <article class="metric-card">
+        <div class="metric-label">Plantios <span class="metric-mark" aria-hidden="true">PL</span></div>
+        <strong class="metric-value">{{ resumo.plantios }}</strong>
+        <span class="metric-note">Cadastros de floresta</span>
+      </article>
+      <article class="metric-card">
+        <div class="metric-label">Talhões <span class="metric-mark" aria-hidden="true">T</span></div>
+        <strong class="metric-value">{{ resumo.talhoes }}</strong>
+        <span class="metric-note">Áreas individualizadas</span>
+      </article>
+      <article class="metric-card">
+        <div class="metric-label">UPCs <span class="metric-mark" aria-hidden="true">UP</span></div>
+        <strong class="metric-value">{{ resumo.upcs }}</strong>
+        <span class="metric-note">Unidades de produção de carvão</span>
+      </article>
+      <article class="metric-card">
+        <div class="metric-label">Inventários <span class="metric-mark" aria-hidden="true">IF</span></div>
+        <strong class="metric-value">{{ resumo.inventarios }}</strong>
+        <span class="metric-note">Inventários florestais por lote</span>
+      </article>
+      <article class="metric-card">
+        <div class="metric-label">Autorizações <span class="metric-mark" aria-hidden="true">AA</span></div>
+        <strong class="metric-value">{{ resumo.autorizacoes }}</strong>
+        <span class="metric-note">DCF e DAIA</span>
+      </article>
+      <article class="metric-card">
+        <div class="metric-label">Expedições <span class="metric-mark" aria-hidden="true">EX</span></div>
+        <strong class="metric-value">{{ resumo.expedicoes }}</strong>
+        <span class="metric-note">Saídas de carvão</span>
+      </article>
+      <article class="metric-card">
+        <div class="metric-label">Transporte de lenha <span class="metric-mark" aria-hidden="true">TL</span></div>
+        <strong class="metric-value">{{ resumo.transportes }}</strong>
+        <span class="metric-note">Viagens de lenha</span>
+      </article>
+      <article class="metric-card">
+        <div class="metric-label">Colheitas <span class="metric-mark" aria-hidden="true">CO</span></div>
+        <strong class="metric-value">{{ resumo.colheitas }}</strong>
+        <span class="metric-note">Colheita por talhão</span>
       </article>
       {% if administrador %}
         <article class="metric-card">
@@ -74,14 +116,9 @@
           <span class="metric-note">Unidades da federação</span>
         </article>
         <article class="metric-card">
-          <div class="metric-label">Cidades <span class="metric-mark" aria-hidden="true">C</span></div>
-          <strong class="metric-value">{{ resumo.cidades }}</strong>
-          <span class="metric-note">Localidades disponíveis</span>
-        </article>
-        <article class="metric-card">
-          <div class="metric-label">Códigos IBGE <span class="metric-mark" aria-hidden="true">IBGE</span></div>
-          <strong class="metric-value">{{ resumo.codigos_ibge }}</strong>
-          <span class="metric-note">Referências importadas</span>
+          <div class="metric-label">Municípios IBGE <span class="metric-mark" aria-hidden="true">IBGE</span></div>
+          <strong class="metric-value">{{ resumo.municipios_ibge }}</strong>
+          <span class="metric-note">Municípios sincronizados</span>
         </article>
       {% endif %}
     </div>
@@ -109,27 +146,27 @@
             <span class="shortcut-icon" aria-hidden="true">P</span>
             <span><h3>Parâmetros</h3><p>Configure idioma, formatos e precisão.</p></span><span class="shortcut-arrow" aria-hidden="true">＋</span>
           </a>
+          <a class="shortcut-card" href="{% url 'novo_registro' 'proprietarios' %}">
+            <span class="shortcut-icon" aria-hidden="true">P</span>
+            <span><h3>Proprietário</h3><p>Cadastre o dono ou possuidor do imóvel.</p></span><span class="shortcut-arrow" aria-hidden="true">＋</span>
+          </a>
           <a class="shortcut-card" href="{% url 'novo_registro' 'fazendas' %}">
             <span class="shortcut-icon" aria-hidden="true">F</span>
-            <span><h3>Fazenda</h3><p>Cadastre fornecedores e locatários de áreas.</p></span><span class="shortcut-arrow" aria-hidden="true">＋</span>
+            <span><h3>Fazenda</h3><p>Cadastre o imóvel rural e seu proprietário.</p></span><span class="shortcut-arrow" aria-hidden="true">＋</span>
           </a>
         {% endif %}
-        <a class="shortcut-card" href="{% url 'novo_registro' 'estados' %}">
-          <span class="shortcut-icon" aria-hidden="true">UF</span>
-          <span><h3>Estado</h3><p>Adicione uma unidade da federação.</p></span><span class="shortcut-arrow" aria-hidden="true">＋</span>
-        </a>
-        <a class="shortcut-card" href="{% url 'novo_registro' 'cidades' %}">
-          <span class="shortcut-icon" aria-hidden="true">L</span>
-          <span><h3>Cidade</h3><p>Adicione um município a um estado.</p></span><span class="shortcut-arrow" aria-hidden="true">＋</span>
-        </a>
-        <a class="shortcut-card" href="{% url 'novo_registro' 'codigos-ibge' %}">
-          <span class="shortcut-icon" aria-hidden="true">#</span>
-          <span><h3>Código IBGE</h3><p>Cadastre uma referência de município.</p></span><span class="shortcut-arrow" aria-hidden="true">＋</span>
+        <a class="shortcut-card" href="{% url 'lista_registros' 'municipios-ibge' %}">
+          <span class="shortcut-icon" aria-hidden="true">IBGE</span>
+          <span><h3>Municípios IBGE</h3><p>Consulte os municípios e códigos sincronizados.</p></span><span class="shortcut-arrow" aria-hidden="true">→</span>
         </a>
       {% else %}
+        <a class="shortcut-card" href="{% url 'novo_registro' 'proprietarios' %}">
+          <span class="shortcut-icon" aria-hidden="true">P</span>
+          <span><h3>Proprietário</h3><p>Cadastre o dono ou possuidor do imóvel.</p></span><span class="shortcut-arrow" aria-hidden="true">＋</span>
+        </a>
         <a class="shortcut-card" href="{% url 'novo_registro' 'fazendas' %}">
           <span class="shortcut-icon" aria-hidden="true">F</span>
-          <span><h3>Fazenda</h3><p>Cadastre fornecedores e locatários de áreas.</p></span><span class="shortcut-arrow" aria-hidden="true">＋</span>
+          <span><h3>Fazenda</h3><p>Cadastre o imóvel rural e seu proprietário.</p></span><span class="shortcut-arrow" aria-hidden="true">＋</span>
         </a>
       {% endif %}
     </div>

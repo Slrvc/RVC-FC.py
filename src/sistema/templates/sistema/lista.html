@@ -5,9 +5,9 @@
     <div>
       <p class="eyebrow">Cadastros</p>
       <h1>{{ titulo }}</h1>
-      <p class="page-description">Consulte e mantenha os registros do sistema.</p>
+      <p class="page-description">{% if somente_leitura %}Dados sincronizados da API oficial do IBGE.{% else %}Consulte e mantenha os registros do sistema.{% endif %}</p>
     </div>
-    <a class="button" href="{% url 'novo_registro' recurso %}"><span aria-hidden="true">＋</span> Novo cadastro</a>
+    {% if not somente_leitura %}<a class="button" href="{% url 'novo_registro' recurso %}"><span aria-hidden="true">＋</span> Novo cadastro</a>{% endif %}
   </div>
   <section class="panel" aria-label="Lista de {{ titulo|lower }}">
     <div class="list-toolbar">
@@ -30,13 +30,13 @@
           {% for linha in linhas %}
             <tr>
               {% for valor in linha.valores %}<td>{{ valor|default:"—" }}</td>{% endfor %}
-              <td><a class="table-action" href="{% url 'editar_registro' recurso linha.objeto.pk %}">Editar</a></td>
+              <td>{% if not somente_leitura %}<a class="table-action" href="{% url 'editar_registro' recurso linha.objeto.pk %}">Editar</a>{% else %}—{% endif %}</td>
             </tr>
           {% empty %}
             <tr>
               <td class="empty-state" colspan="20">
                 <strong>{% if termo %}Nenhum resultado encontrado{% else %}Ainda não há registros{% endif %}</strong>
-                <p>{% if termo %}Tente buscar por outro termo.{% else %}Use “Novo cadastro” para adicionar o primeiro registro.{% endif %}</p>
+                <p>{% if termo %}Tente buscar por outro termo.{% elif somente_leitura %}Sincronize os municípios pelo comando `uv run python src\manage.py sincronizar_municipios_ibge`.{% else %}Use “Novo cadastro” para adicionar o primeiro registro.{% endif %}</p>
               </td>
             </tr>
           {% endfor %}
