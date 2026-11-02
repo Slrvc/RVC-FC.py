@@ -1,4 +1,5 @@
 import json
+import re
 from decimal import Decimal
 from gzip import compress as compress_gzip
 from io import BytesIO
@@ -97,13 +98,13 @@ class FluxoAdministrativoTests(TestCase):
         cls.proprietario_proprio = Proprietario.objects.create(
             empresa=cls.empresa,
             nome_razao_social="Proprietário da unidade",
-            cpf_cnpj="12345678000199",
+            cpf_cnpj="12.345.678/0001-99",
             municipio=cls.municipio,
         )
         cls.proprietario_alheio = Proprietario.objects.create(
             empresa=cls.outra_empresa,
             nome_razao_social="Proprietário de outra empresa",
-            cpf_cnpj="12345678901",
+            cpf_cnpj="123.456.789-01",
         )
         cls.fazenda_propria = Fazenda.objects.create(
             empresa=cls.empresa,
@@ -326,6 +327,34 @@ class FluxoAdministrativoTests(TestCase):
         )
         self.assertEqual(resposta.status_code, 302)
 
+    def test_tela_de_escolha_mostra_tipo_cidade_e_cnpj(self):
+        self.outra_empresa.tipo = "FILIAL"
+        self.outra_empresa.descricao_filial = "Filial 01 - Sete Lagoas"
+        self.outra_empresa.save()
+        self.client.force_login(self.administrador)
+
+        resposta = self.client.get(reverse("selecionar_empresa"))
+
+        self.assertContains(resposta, "Filial 01 - Sete Lagoas")
+        self.assertContains(resposta, "Matriz")
+        self.assertContains(resposta, "CNPJ 00000000000272")
+        self.assertContains(resposta, "Montes Claros/MG")
+
+    def test_seletor_de_empresa_nos_formularios_identifica_a_unidade(self):
+        self.client.force_login(self.administrador)
+        self.client.post(reverse("selecionar_empresa"), {"empresa": self.empresa.pk})
+
+        resposta = self.client.get(reverse("novo_registro", args=["upcs"]))
+
+        self.assertContains(resposta, "CNPJ 00000000000191")
+        self.assertContains(resposta, "Montes Claros/MG")
+
+    def test_filial_exige_descricao(self):
+        dados = {"tipo": "FILIAL", "descricao_filial": ""}
+        form = EmpresaForm(dados)
+        form.is_valid()
+        self.assertIn("descricao_filial", form.errors)
+
     def test_administrador_escolhe_empresa_ativa_e_upc_nasce_nela(self):
         self.client.force_login(self.administrador)
 
@@ -346,27 +375,13 @@ class FluxoAdministrativoTests(TestCase):
         self.assertContains(resposta, "Fazenda da unidade")
         self.assertContains(resposta, "Fazenda de outra empresa")
 
-    def test_menu_preserva_destino_ao_exigir_empresa_do_administrador(self):
+    def test_administrador_abre_cadastros_sem_escolher_empresa(self):
         self.client.force_login(self.administrador)
-        destino = reverse("lista_registros", args=["fazendas"])
 
-        resposta = self.client.get(destino)
-        url_selecao = resposta["Location"]
-        self.assertIn("proximo=", url_selecao, url_selecao)
-        self.assertRedirects(
-            resposta,
-            f"{reverse('selecionar_empresa')}?proximo={destino.replace('/', '%2F')}",
-            fetch_redirect_response=False,
-        )
-
-        resposta = self.client.get(url_selecao)
-        self.assertEqual(resposta.wsgi_request.GET.get("proximo"), destino)
-        self.assertContains(resposta, f'name="proximo" value="{destino}"')
-        resposta = self.client.post(
-            url_selecao, {"empresa": self.empresa.pk, "proximo": destino}
-        )
-        self.assertRedirects(resposta, destino)
-        self.assertEqual(self.client.get(destino).status_code, 200)
+        for recurso in ("upcs", "fazendas"):
+            with self.subTest(recurso=recurso):
+                resposta = self.client.get(reverse("lista_registros", args=[recurso]))
+                self.assertEqual(resposta.status_code, 200)
 
     def test_selecao_de_upc_preserva_destino_do_menu(self):
         dados_upc = {
@@ -535,6 +550,7 @@ class FluxoAdministrativoTests(TestCase):
             reverse("novo_registro", args=["usuarios"]),
             {
                 "username": "novo-gestor",
+                "tipo_usuario": "gestor",
                 "nome_completo": "Novo Gestor",
                 "email": "novo@example.com",
                 "empresa": self.empresa.pk,
@@ -551,6 +567,26 @@ class FluxoAdministrativoTests(TestCase):
         self.assertTrue(usuario.check_password(GESTOR_CREDENTIAL))
         self.assertTrue(usuario.primeiro_acesso)
         self.assertEqual(usuario.usuario_inclusao, self.administrador)
+
+    def test_administrador_cria_outro_administrador_sem_empresa(self):
+        self.client.force_login(self.administrador)
+
+        self.client.post(
+            reverse("novo_registro", args=["usuarios"]),
+            {
+                "username": "novo-adm",
+                "tipo_usuario": "admin",
+                "nome_completo": "Novo Adm",
+                "email": "adm@example.com",
+                "is_active": "on",
+                "senha": GESTOR_CREDENTIAL,
+            },
+        )
+
+        usuario = get_user_model().objects.get(username="novo-adm")
+        self.assertTrue(usuario.is_superuser)
+        self.assertTrue(usuario.is_staff)
+        self.assertIsNone(usuario.empresa)
 
     def test_tela_de_empresa_exibe_campos_em_secoes(self):
         self.client.force_login(self.administrador)
@@ -633,7 +669,7 @@ class FluxoAdministrativoTests(TestCase):
         resposta = self.client.post(url, dados)
 
         self.assertEqual(resposta.status_code, 302)
-        novo = Proprietario.objects.get(cpf_cnpj="99999999999")
+        novo = Proprietario.objects.get(cpf_cnpj="999.999.999-99")
         self.assertEqual(novo.empresa, self.empresa)
         self.assertIsNone(novo.municipio)
 
@@ -671,7 +707,7 @@ class FluxoAdministrativoTests(TestCase):
         self.assertEqual(self.client.post(url, dados).status_code, 302)
         resposta = self.client.post(url, dados)
         self.assertContains(resposta, "Já existe um registro")
-        fornecedor = Fornecedor.objects.get(cpf_cnpj="11111111000100")
+        fornecedor = Fornecedor.objects.get(cpf_cnpj="11.111.111/0001-00")
         self.assertEqual(fornecedor.empresa, self.empresa)
         self.assertEqual(fornecedor.tipos(), "Serviço")
 
@@ -1185,6 +1221,92 @@ class FluxoAdministrativoTests(TestCase):
         resposta = self.client.get(reverse("novo_registro", args=["municipios-ibge"]))
 
         self.assertEqual(resposta.status_code, 403)
+
+    def test_todos_os_links_do_menu_do_gestor_abrem(self):
+        self.client.force_login(self.gestor)
+        pagina = self.client.get(reverse("inicio"))
+        links = set(
+            re.findall(r'class="nav-link[^"]*" href="([^"]+)"', pagina.content.decode())
+        )
+        self.assertGreater(len(links), 10)
+        for link in sorted(links):
+            with self.subTest(link=link):
+                self.assertEqual(self.client.get(link).status_code, 200)
+
+    def test_menu_trocado_de_empresa_atualiza_o_cabecalho(self):
+        self.outra_empresa.tipo = "FILIAL"
+        self.outra_empresa.descricao_filial = "Filial 02 - Alpinópolis"
+        self.outra_empresa.save()
+        self.client.force_login(self.administrador)
+        self.assertContains(self.client.get(reverse("inicio")), "Todas as empresas")
+
+        self.client.post(
+            reverse("selecionar_empresa"), {"empresa": self.outra_empresa.pk}
+        )
+
+        resposta = self.client.get(reverse("inicio"))
+        self.assertContains(resposta, "Filial 02 - Alpinópolis")
+        self.assertNotContains(resposta, "Todas as empresas")
+
+    def test_operador_ve_e_acessa_apenas_producao(self):
+        operador = get_user_model().objects.create_user(
+            username="oper",
+            password="x",
+            nome_completo="Operador",
+            empresa=self.empresa,
+            tipo_usuario="operador",
+            primeiro_acesso=False,
+        )
+        self.client.force_login(operador)
+
+        pagina = self.client.get(reverse("inicio"))
+        self.assertContains(pagina, reverse("lista_registros", args=["colheitas"]))
+        self.assertNotContains(pagina, reverse("lista_registros", args=["fazendas"]))
+        self.assertEqual(
+            self.client.get(reverse("lista_registros", args=["colheitas"])).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.get(reverse("lista_registros", args=["fazendas"])).status_code,
+            403,
+        )
+
+    def test_usuario_em_primeiro_acesso_ve_aviso_em_vez_do_menu(self):
+        self.gestor.primeiro_acesso = True
+        self.gestor.save()
+        self.client.force_login(self.gestor)
+
+        resposta = self.client.get(reverse("password_change"))
+
+        self.assertContains(resposta, "Defina uma nova senha")
+        self.assertContains(resposta, "Salvar nova senha")
+
+    def test_empresa_formata_cnpj_cep_e_telefone(self):
+        form = EmpresaForm(
+            {
+                "tipo": "MATRIZ",
+                "cnpj": "12345678000195",
+                "razao_social": "X",
+                "estado": self.estado.pk,
+                "municipio": self.municipio.pk,
+                "endereco": "Rua",
+                "bairro": "Centro",
+                "cep": "39400000",
+                "telefone": "3832221111",
+                "celular": "38999998888",
+            }
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form.cleaned_data["cnpj"], "12.345.678/0001-95")
+        self.assertEqual(form.cleaned_data["cep"], "39400-000")
+        self.assertEqual(form.cleaned_data["telefone"], "(38) 3222-1111")
+        self.assertEqual(form.cleaned_data["celular"], "(38) 99999-8888")
+
+    def test_cnpj_e_cep_incompletos_sao_recusados(self):
+        form = EmpresaForm({"cnpj": "123", "cep": "12"})
+        form.is_valid()
+        self.assertIn("cnpj", form.errors)
+        self.assertIn("cep", form.errors)
 
 
 class PrimeiroCadastroTests(TestCase):

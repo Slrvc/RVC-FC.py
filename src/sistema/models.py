@@ -42,6 +42,7 @@ class Municipio(models.Model):
 class TipoUsuario(models.TextChoices):
     ADMINISTRADOR = "admin", "Administrador do sistema"
     GESTOR = "gestor", "Gestor da unidade"
+    OPERADOR = "operador", "Operador (lançamentos de produção)"
 
 
 class UsuarioManager(UserManager):
@@ -136,8 +137,22 @@ class RegistroAuditavel(models.Model):
         abstract = True
 
 
+class TipoEmpresa(models.TextChoices):
+    MATRIZ = "MATRIZ", "Matriz"
+    FILIAL = "FILIAL", "Filial"
+
+
 class Empresa(RegistroAuditavel):
     codigo = models.BigAutoField(primary_key=True)
+    tipo = models.CharField(
+        max_length=6, choices=TipoEmpresa.choices, default=TipoEmpresa.MATRIZ
+    )
+    descricao_filial = models.CharField(
+        "Descrição da filial",
+        max_length=100,
+        blank=True,
+        help_text="Ex.: Filial 01 - Sete Lagoas.",
+    )
     cnpj = models.CharField("CNPJ", max_length=18, unique=True)
     razao_social = models.CharField(max_length=150)
     nome_fantasia = models.CharField(max_length=150, blank=True)
@@ -162,6 +177,17 @@ class Empresa(RegistroAuditavel):
 
     def __str__(self) -> str:
         return self.nome_fantasia or self.razao_social
+
+    @property
+    def tipo_exibicao(self) -> str:
+        if self.tipo == TipoEmpresa.FILIAL and self.descricao_filial:
+            return self.descricao_filial
+        return self.get_tipo_display()
+
+    @property
+    def identificacao(self) -> str:
+        local = f"{self.municipio.nome}/{self.municipio.estado.uf}"
+        return f"{self} · {self.tipo_exibicao} · {local} · CNPJ {self.cnpj}"
 
 
 class Idioma(models.IntegerChoices):

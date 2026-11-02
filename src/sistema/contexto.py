@@ -62,4 +62,6 @@ def contexto_ativo(request: HttpRequest) -> dict[str, object]:
         "upc_ativa": upc_ativa(request),
         "empresa_ativa": empresa_ativa(request),
         "usuario_admin": usuario_eh_admin(request.user),
+        "usuario_operador": getattr(request.user, "tipo_usuario", None)
+        == TipoUsuario.OPERADOR,
     }

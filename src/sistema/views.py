@@ -292,9 +292,11 @@ RECURSOS: dict[str, dict[str, Any]] = {
             ("Código", "codigo"),
             ("CNPJ", "cnpj"),
             ("Razão social", "razao_social"),
+            ("Tipo", "tipo_exibicao"),
             ("Município", "municipio"),
         ],
         "busca": [
+            "descricao_filial",
             "cnpj",
             "razao_social",
             "nome_fantasia",
@@ -789,6 +791,24 @@ def municipios_por_estado(request: HttpRequest) -> JsonResponse:
     return JsonResponse({"municipios": list(municipios)})
 
 
+RECURSOS_DO_OPERADOR = {
+    "colheitas",
+    "expedicoes",
+    "transportes-lenha",
+    "producoes-carvao",
+    "inventarios",
+    "inventarios-talhao",
+}
+
+
+def _perfil_acessa(usuario: Usuario, recurso: str) -> bool:
+    if usuario.tipo_usuario == TipoUsuario.GESTOR:
+        return True
+    return (
+        usuario.tipo_usuario == TipoUsuario.OPERADOR and recurso in RECURSOS_DO_OPERADOR
+    )
+
+
 def _configurar_recurso(request: HttpRequest, recurso: str) -> dict[str, Any]:
     usuario = usuario_autenticado(request)
     configuracao = RECURSOS.get(recurso)
@@ -796,9 +816,7 @@ def _configurar_recurso(request: HttpRequest, recurso: str) -> dict[str, Any]:
         raise Http404
     if configuracao["somente_admin"] and not eh_administrador(usuario):
         raise PermissionDenied
-    if not configuracao["somente_admin"] and not (
-        eh_administrador(usuario) or usuario.tipo_usuario == TipoUsuario.GESTOR
-    ):
+    if not eh_administrador(usuario) and not _perfil_acessa(usuario, recurso):
         raise PermissionDenied
     if (
         configuracao["modelo"] in MODELOS_POR_EMPRESA
@@ -822,8 +840,6 @@ def _queryset_recurso(
     queryset = configuracao["modelo"].objects.all()
     if configuracao["modelo"] is Municipio:
         queryset = queryset.filter(ativo=True)
-    if configuracao["modelo"] is Usuario:
-        queryset = queryset.filter(is_superuser=False)
     empresa = empresa_ativa(request)
     if (
         configuracao["modelo"] in MODELOS_POR_EMPRESA
@@ -951,6 +967,8 @@ def _adicionar_atalhos(
         if campo is None or destino == recurso:
             continue
         if restrito and not eh_administrador(usuario):
+            continue
+        if not eh_administrador(usuario) and not _perfil_acessa(usuario, destino):
             continue
         campo.atalho_url = f"{reverse('novo_registro', args=[destino])}?{retorno}"
 

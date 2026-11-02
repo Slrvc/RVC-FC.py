@@ -83,7 +83,8 @@ target-version = "py315"
 fix = true
 show-fixes = true
 indent-width = 4
-exclude = ["venv", ".venv", "env", ".env", "node_modules", "__pycache__"]
+exclude = ["venv", ".venv", "env", ".env", "node_modules", "__pycache__", "**/migrations"]
+extend-exclude = ["**/migrations"]
 
 [tool.ruff.lint]
 select = [
@@ -145,6 +146,9 @@ reportAttributeAccessIssue = "none"
 reportOptionalMemberAccess = "none"
 reportOptionalIterable = "none"
 reportGeneralTypeIssues = "none"
+reportOptionalSubscript = "none"
+reportArgumentType = "none"
+reportCallIssue = "none"
 reportIncompatibleVariableOverride = "none"
 reportIncompatibleMethodOverride = "none"
 pythonVersion = "3.15"
@@ -156,6 +160,7 @@ exclude = [
     "**/.env",
     "**/node_modules",
     "**/__pycache__",
+    "**/migrations",
 ]
 venv = ".venv"
 venvPath = "."

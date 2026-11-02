@@ -18,9 +18,11 @@
         <div class="topbar-user">
           <div class="user-details">
             <strong>{{ request.user.nome_completo|default:request.user.username }}</strong>
-            <span>{% if request.user.is_superuser or request.user.tipo_usuario == "admin" %}Administrador{% else %}Gestor da unidade{% endif %}</span>
-            {% if request.user.empresa %}
-              <span>{{ request.user.empresa.razao_social }} · {% if upc_ativa %}UPC {{ upc_ativa.nome }}{% else %}{% for upc in request.user.upcs.all %}{{ upc.nome }}{% if not forloop.last %}, {% endif %}{% empty %}Todas as UPCs{% endfor %}{% endif %}</span>
+            <span>{% if request.user.is_superuser or request.user.tipo_usuario == "admin" %}Administrador{% else %}{{ request.user.get_tipo_usuario_display }}{% endif %}</span>
+            {% if empresa_ativa %}
+              <span>{{ empresa_ativa.identificacao }}{% if not usuario_admin %} · {% if upc_ativa %}UPC {{ upc_ativa.nome }}{% else %}{% for upc in request.user.upcs.all %}{{ upc.nome }}{% if not forloop.last %}, {% endif %}{% empty %}Todas as UPCs{% endfor %}{% endif %}{% endif %}</span>
+            {% elif usuario_admin %}
+              <span>Todas as empresas</span>
             {% endif %}
           </div>
           <form method="post" action="{% url 'logout' %}">
@@ -32,10 +34,28 @@
       <div class="app-shell">
         <aside class="sidebar">
           <div class="sidebar-label">Menu principal</div>
+          {% if request.user.primeiro_acesso %}
+            <p class="sidebar-aviso">Defina uma nova senha para liberar o menu.</p>
+          {% else %}
           <nav aria-label="Navegação principal">
             <a class="nav-link{% if request.resolver_match.url_name == 'inicio' %} is-active{% endif %}" href="{% url 'inicio' %}">
               <span class="nav-icon" aria-hidden="true">⌂</span> Visão geral
             </a>
+            {% if usuario_operador %}
+              <div class="sidebar-label">Produção</div>
+            <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'inventarios' %} is-active{% endif %}" href="{% url 'lista_registros' 'inventarios' %}"><span class="nav-icon" aria-hidden="true">≣</span> Inventários</a>
+
+            <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'inventarios-talhao' %} is-active{% endif %}" href="{% url 'lista_registros' 'inventarios-talhao' %}"><span class="nav-icon" aria-hidden="true">▦</span> Inventário por talhão</a>
+
+            <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'expedicoes' %} is-active{% endif %}" href="{% url 'lista_registros' 'expedicoes' %}"><span class="nav-icon" aria-hidden="true">⇢</span> Expedições</a>
+
+            <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'transportes-lenha' %} is-active{% endif %}" href="{% url 'lista_registros' 'transportes-lenha' %}"><span class="nav-icon" aria-hidden="true">⛟</span> Transporte de lenha</a>
+
+            <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'colheitas' %} is-active{% endif %}" href="{% url 'lista_registros' 'colheitas' %}"><span class="nav-icon" aria-hidden="true">✂</span> Colheitas</a>
+
+            <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'producoes-carvao' %} is-active{% endif %}" href="{% url 'lista_registros' 'producoes-carvao' %}"><span class="nav-icon" aria-hidden="true">▦</span> Produção de carvão</a>
+
+            {% else %}
             <div class="sidebar-label">Cadastros</div>
             {% if request.user.is_superuser or request.user.tipo_usuario == "admin" %}
               <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'empresas' %} is-active{% endif %}" href="{% url 'lista_registros' 'empresas' %}"><span class="nav-icon" aria-hidden="true">▦</span> Empresas</a>
@@ -67,9 +87,11 @@
               <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'estados' %} is-active{% endif %}" href="{% url 'lista_registros' 'estados' %}"><span class="nav-icon" aria-hidden="true">◇</span> Estados</a>
               <a class="nav-link{% if request.resolver_match.kwargs.recurso == 'municipios-ibge' %} is-active{% endif %}" href="{% url 'lista_registros' 'municipios-ibge' %}"><span class="nav-icon" aria-hidden="true">#</span> Municípios IBGE</a>
             {% endif %}
+            {% endif %}
             <div class="sidebar-label">Conta</div>
             <a class="nav-link{% if request.resolver_match.url_name == 'password_change' %} is-active{% endif %}" href="{% url 'password_change' %}"><span class="nav-icon" aria-hidden="true">♧</span> Alterar senha</a>
           </nav>
+          {% endif %}
           {% if usuario_admin or empresa_ativa %}
             <div class="sidebar-unit">
               <span class="unit-indicator" aria-hidden="true"></span>

@@ -6,6 +6,7 @@ from django import forms
 from django.contrib.auth.password_validation import validate_password
 from django.db.models import Q, Sum
 
+from sistema.formatacao import MASCARAS_POR_CAMPO, MENSAGENS, normalizar
 from sistema.models import (
     EQUIPAMENTOS_POR_SISTEMA,
     UPC,
@@ -50,8 +51,14 @@ if TYPE_CHECKING:
 
 class ContextoEmpresaForm(forms.Form):
     empresa = forms.ModelChoiceField(
-        queryset=Empresa.objects.all(), label="Empresa", empty_label=None
+        queryset=Empresa.objects.select_related("municipio__estado"),
+        label="Empresa",
+        empty_label=None,
     )
+
+    def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        super().__init__(*args, **kwargs)
+        self.fields["empresa"].label_from_instance = lambda e: e.identificacao
 
 
 class ContextoUPCForm(forms.Form):
@@ -68,6 +75,28 @@ class FormularioEmSecoes(forms.ModelForm):
 
     def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
         super().__init__(*args, **kwargs)
+        for nome, tipo in MASCARAS_POR_CAMPO.items():
+            if nome in self.fields:
+                self.fields[nome].widget.attrs["data-mask"] = tipo
+                self.fields[nome].widget.attrs["inputmode"] = "numeric"
+        for campo in self.fields.values():
+            if (
+                isinstance(campo, forms.ModelChoiceField)
+                and campo.queryset.model is Empresa
+            ):
+                campo.queryset = campo.queryset.select_related("municipio__estado")
+                campo.label_from_instance = lambda e: e.identificacao
+
+    def clean(self):
+        dados = super().clean()
+        for nome, tipo in MASCARAS_POR_CAMPO.items():
+            if nome not in self.fields or nome in self.errors:
+                continue
+            try:
+                dados[nome] = normalizar(tipo, dados.get(nome, ""))
+            except ValueError:
+                self.add_error(nome, MENSAGENS[tipo])
+        return dados
 
     @property
     def secoes(self):
@@ -144,6 +173,8 @@ class EmpresaForm(FormularioComMunicipio):
             "Identificação da empresa",
             "Informe os dados fiscais e os nomes usados pela unidade.",
             (
+                "tipo",
+                "descricao_filial",
                 "cnpj",
                 "razao_social",
                 "nome_fantasia",
@@ -174,6 +205,8 @@ class EmpresaForm(FormularioComMunicipio):
     class Meta:
         model = Empresa
         fields = [
+            "tipo",
+            "descricao_filial",
             "cnpj",
             "razao_social",
             "nome_fantasia",
@@ -192,6 +225,7 @@ class EmpresaForm(FormularioComMunicipio):
             "site",
         ]
         labels = {
+            "tipo": "Tipo da unidade",
             "razao_social": "Razão social",
             "nome_fantasia": "Nome fantasia",
             "inscricao_estadual": "Inscrição estadual",
@@ -207,29 +241,65 @@ class EmpresaForm(FormularioComMunicipio):
             "site": "Informe o endereço completo, incluindo https://.",
         }
 
+    def clean(self):
+        dados = super().clean()
+        if dados.get("tipo") == "FILIAL":
+            if not dados.get("descricao_filial"):
+                self.add_error(
+                    "descricao_filial",
+                    "Descreva a filial. Ex.: Filial 01 - Sete Lagoas.",
+                )
+        else:
+            dados["descricao_filial"] = ""
+        return dados
+
+
+class UPCsPorEmpresaWidget(forms.SelectMultiple):
+    def create_option(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        opcao = super().create_option(*args, **kwargs)
+        value = args[1] if len(args) > 1 else kwargs["value"]
+        instancia = getattr(value, "instance", None)
+        if instancia is not None:
+            opcao["attrs"]["data-empresa"] = instancia.empresa_id
+        return opcao
+
 
 class UsuarioForm(FormularioEmSecoes):
     secoes_campos = (
         (
             "Dados de acesso",
             "O usuário recebe uma senha temporária e deverá alterá-la ao entrar.",
-            ("username", "senha", "is_active"),
+            ("username", "senha", "tipo_usuario", "is_active"),
         ),
         (
-            "Dados do gestor",
+            "Dados do usuário",
             (
-                "Cada gestor fica associado a uma empresa/unidade. "
-                "Escolha as UPCs que ele acessa; sem seleção, acessa todas da empresa."
+                "Administradores acessam todas as empresas. Gestores ficam "
+                "associados a uma empresa/unidade."
             ),
-            ("nome_completo", "email", "empresa", "upcs"),
+            ("nome_completo", "email"),
         ),
+        (
+            "Vínculo do gestor",
+            (
+                "Escolha as UPCs que ele acessa (segure Ctrl para marcar várias); "
+                "sem seleção, acessa todas as UPCs da empresa."
+            ),
+            ("empresa", "upcs"),
+        ),
+    )
+
+    tipo_usuario = forms.ChoiceField(
+        label="Tipo de usuário",
+        choices=TipoUsuario.choices,
+        initial=TipoUsuario.GESTOR,
     )
 
     upcs = forms.ModelMultipleChoiceField(
         label="UPCs com acesso",
         queryset=UPC.objects.select_related("empresa"),
         required=False,
-        widget=forms.CheckboxSelectMultiple,
+        widget=UPCsPorEmpresaWidget,
     )
 
     senha = forms.CharField(
@@ -246,6 +316,7 @@ class UsuarioForm(FormularioEmSecoes):
         model = Usuario
         fields = [
             "username",
+            "tipo_usuario",
             "nome_completo",
             "email",
             "empresa",
@@ -272,16 +343,16 @@ class UsuarioForm(FormularioEmSecoes):
             validate_password(senha, self.instance)
         return senha
 
-    def clean_empresa(self):
-        empresa = self.cleaned_data.get("empresa")
-        if empresa is None:
-            message = "Selecione a empresa do gestor."
-            raise forms.ValidationError(message)
-        return empresa
-
     def clean(self):
         dados = super().clean()
+        if dados.get("tipo_usuario") == TipoUsuario.ADMINISTRADOR:
+            dados["empresa"] = None
+            dados["upcs"] = UPC.objects.none()
+            self.errors.pop("empresa", None)
+            return dados
         empresa = dados.get("empresa")
+        if empresa is None:
+            self.add_error("empresa", "Selecione a empresa do gestor.")
         upcs = dados.get("upcs")
         if empresa and upcs and any(u.empresa_id != empresa.pk for u in upcs):
             self.add_error("upcs", "Selecione apenas UPCs da empresa do gestor.")
@@ -293,7 +364,9 @@ class UsuarioForm(FormularioEmSecoes):
         if senha:
             usuario.set_password(senha)
             usuario.primeiro_acesso = True
-        usuario.tipo_usuario = TipoUsuario.GESTOR
+        administrador = usuario.tipo_usuario == TipoUsuario.ADMINISTRADOR
+        usuario.is_staff = administrador
+        usuario.is_superuser = administrador
         if commit:
             usuario.save()
             self.save_m2m()
@@ -1830,8 +1903,10 @@ class LancamentoCustoForm(FormularioDaEmpresa, FormularioEmSecoes):
     secoes_campos = (
         (
             "Lançamento",
-            "Um lançamento por gasto. Transporte terceirizado e frete do carvão "
-            "não entram aqui.",
+            (
+                "Um lançamento por gasto. Transporte terceirizado e frete do carvão "
+                "não entram aqui."
+            ),
             (
                 "empresa",
                 "data_lancamento",

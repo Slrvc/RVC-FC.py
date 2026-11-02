@@ -17,6 +17,8 @@
       <a class="button" href="{% url 'novo_registro' 'empresas' %}">Cadastrar primeira empresa <span aria-hidden="true">→</span></a>
     {% elif administrador and not empresa %}
       <a class="button" href="{% url 'selecionar_empresa' %}">Selecionar empresa <span aria-hidden="true">→</span></a>
+    {% elif usuario_operador %}
+      <a class="button" href="{% url 'lista_registros' 'colheitas' %}">Lançar produção <span aria-hidden="true">→</span></a>
     {% else %}
       <a class="button" href="{% url 'lista_registros' 'fazendas' %}">Acessar fazendas <span aria-hidden="true">→</span></a>
     {% endif %}
@@ -34,6 +36,7 @@
     </section>
   {% endif %}
 
+  {% if not usuario_operador %}
   <section aria-labelledby="resumo-heading">
     <div class="section-heading">
       <div>
@@ -123,6 +126,7 @@
       {% endif %}
     </div>
   </section>
+  {% endif %}
 
   <section aria-labelledby="atalhos-heading">
     <div class="section-heading">
@@ -158,6 +162,19 @@
         <a class="shortcut-card" href="{% url 'lista_registros' 'municipios-ibge' %}">
           <span class="shortcut-icon" aria-hidden="true">IBGE</span>
           <span><h3>Municípios IBGE</h3><p>Consulte os municípios e códigos sincronizados.</p></span><span class="shortcut-arrow" aria-hidden="true">→</span>
+        </a>
+      {% elif usuario_operador %}
+        <a class="shortcut-card" href="{% url 'novo_registro' 'colheitas' %}">
+          <span class="shortcut-icon" aria-hidden="true">C</span>
+          <span><h3>Colheita</h3><p>Registre a colheita realizada.</p></span><span class="shortcut-arrow" aria-hidden="true">＋</span>
+        </a>
+        <a class="shortcut-card" href="{% url 'novo_registro' 'producoes-carvao' %}">
+          <span class="shortcut-icon" aria-hidden="true">P</span>
+          <span><h3>Produção de carvão</h3><p>Lance a produção da UPC.</p></span><span class="shortcut-arrow" aria-hidden="true">＋</span>
+        </a>
+        <a class="shortcut-card" href="{% url 'novo_registro' 'transportes-lenha' %}">
+          <span class="shortcut-icon" aria-hidden="true">T</span>
+          <span><h3>Transporte de lenha</h3><p>Registre o transporte realizado.</p></span><span class="shortcut-arrow" aria-hidden="true">＋</span>
         </a>
       {% else %}
         <a class="shortcut-card" href="{% url 'novo_registro' 'proprietarios' %}">

@@ -1016,3 +1016,12 @@ tbody tr:last-child td {
     width: 100%;
   }
 }
+
+.sidebar-aviso {
+  margin: 0.5rem 0;
+  padding: 0.75rem;
+  border-radius: 0.5rem;
+  background: #fff6dd;
+  color: #5c4500;
+  font-size: 0.9rem;
+}
