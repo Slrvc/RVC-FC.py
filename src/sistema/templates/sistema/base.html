@@ -25,6 +25,9 @@
               <span>Todas as empresas</span>
             {% endif %}
           </div>
+          {% if usuario_admin %}
+            <a class="button button-quiet" href="{% url 'selecionar_empresa' %}">Trocar empresa</a>
+          {% endif %}
           <form method="post" action="{% url 'logout' %}">
             {% csrf_token %}
             <button class="button button-quiet" type="submit">Sair</button>
@@ -102,9 +105,6 @@
                 {% else %}
                   <strong>Nenhuma empresa selecionada</strong>
                 {% endif %}
-                {% if usuario_admin %}
-                  <a href="{% url 'selecionar_empresa' %}">{% if empresa_ativa %}Trocar empresa{% else %}Selecionar empresa{% endif %}</a>
-                {% endif %}
                 {% if upc_ativa %}<strong>UPC: {{ upc_ativa.nome }}</strong> <a href="{% url 'selecionar_upc' %}">Trocar</a>{% endif %}
               </div>
             </div>
@@ -123,6 +123,6 @@
     {% else %}
       {% block public_content %}{% endblock %}
     {% endif %}
-    <script src="{% static 'sistema/app.js' %}?v=2" defer></script>
+    <script src="{% static 'sistema/app.js' %}?v=8" defer></script>
   </body>
 </html>

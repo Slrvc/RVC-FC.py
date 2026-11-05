@@ -8,7 +8,7 @@
       <p class="page-description">Preencha as informações abaixo para {% if novo %}adicionar um registro{% else %}atualizar este registro{% endif %}.</p>
     </div>
   </div>
-  <form class="panel form-panel" method="post" data-municipios-url="{% url 'municipios_por_estado' %}">
+  <form class="panel form-panel" method="post" data-rascunho data-municipios-url="{% url 'municipios_por_estado' %}" data-plantios-url="{% url 'plantios_por_fazenda' %}"{% if recurso == "inventarios-talhao" %} data-talhoes-url="{% url 'talhoes_por_inventario' %}"{% endif %}>
     {% csrf_token %}
     {% if formulario.non_field_errors %}<div class="error-list" role="alert">{{ formulario.non_field_errors }}</div>{% endif %}
     {% for secao in formulario.secoes %}
@@ -17,12 +17,14 @@
         {% if secao.descricao %}<p class="form-section-description">{{ secao.descricao }}</p>{% endif %}
         <div class="form-grid">
           {% for field in secao.campos %}
-            <div class="field{% if field.field.widget.input_type == 'checkbox' %} field-checkbox{% endif %}">
-              <label for="{{ field.id_for_label }}">{{ field.label }}{% if field.field.atalho_url %} <a class="field-shortcut" href="{{ field.field.atalho_url }}">+ Cadastrar novo</a>{% endif %}</label>
+            <div class="field{% if field.field.widget.input_type == 'checkbox' %} field-checkbox{% endif %}{% if recurso == 'plantios' and field.name == 'fazenda' %} field-wide{% endif %}">
+              <label for="{{ field.id_for_label }}">{{ field.label }}{% if field.field.atalho_url %} <a class="field-shortcut" href="{{ field.field.atalho_url }}" data-rascunho-link>+ Cadastrar novo</a>{% endif %}</label>
               {{ field }}
               {% if field.help_text %}<span class="help-text">{{ field.help_text }}</span>{% endif %}
               {% for error in field.errors %}<span class="error-text" role="alert">{{ error }}</span>{% endfor %}
               {% if field.name == "municipio" %}<span class="field-status" id="municipio-status" aria-live="polite"></span>{% endif %}
+              {% if field.name == "plantio" %}<span class="field-status" id="plantio-status" aria-live="polite"></span>{% endif %}
+              {% if field.name == "talhao" and recurso == "inventarios-talhao" %}<span class="field-status" id="talhao-status" aria-live="polite"></span>{% endif %}
             </div>
           {% endfor %}
         </div>

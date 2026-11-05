@@ -9,8 +9,10 @@ from sistema.views import (
     inicio,
     lista_registros,
     municipios_por_estado,
+    plantios_por_fazenda,
     selecionar_empresa,
     selecionar_upc,
+    talhoes_por_inventario,
 )
 
 urlpatterns = [
@@ -24,6 +26,16 @@ urlpatterns = [
         "localidades/municipios/",
         municipios_por_estado,
         name="municipios_por_estado",
+    ),
+    path(
+        "localidades/plantios/",
+        plantios_por_fazenda,
+        name="plantios_por_fazenda",
+    ),
+    path(
+        "localidades/talhoes/",
+        talhoes_por_inventario,
+        name="talhoes_por_inventario",
     ),
     path("gestao/<slug:recurso>/", lista_registros, name="lista_registros"),
     path(

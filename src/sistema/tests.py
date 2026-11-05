@@ -8,6 +8,7 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.http import QueryDict
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
@@ -198,9 +199,7 @@ class FluxoAdministrativoTests(TestCase):
         ):
             self.client.force_login(usuario)
             if usuario == self.administrador:
-                self.client.post(
-                    reverse("selecionar_empresa"), {"empresa": self.empresa.pk}
-                )
+                self.client.post(reverse("selecionar_empresa"), {"empresa": self.empresa.pk})
             for recurso in sorted(recursos):
                 rotas = [("lista_registros", [recurso])]
                 if not RECURSOS[recurso].get("somente_leitura"):
@@ -340,14 +339,23 @@ class FluxoAdministrativoTests(TestCase):
         self.assertContains(resposta, "CNPJ 00000000000272")
         self.assertContains(resposta, "Montes Claros/MG")
 
-    def test_seletor_de_empresa_nos_formularios_identifica_a_unidade(self):
+    def test_formularios_herdam_empresa_ativa_sem_mostrar_seletor(self):
         self.client.force_login(self.administrador)
         self.client.post(reverse("selecionar_empresa"), {"empresa": self.empresa.pk})
 
         resposta = self.client.get(reverse("novo_registro", args=["upcs"]))
 
-        self.assertContains(resposta, "CNPJ 00000000000191")
-        self.assertContains(resposta, "Montes Claros/MG")
+        self.assertNotIn("empresa", resposta.context["formulario"].fields)
+
+        resposta = self.client.post(
+            reverse("novo_registro", args=["proprietarios"]),
+            {"nome_razao_social": "Proprietário cadastrado pelo admin", "cpf_cnpj": "99999999999"},
+        )
+        self.assertEqual(resposta.status_code, 302)
+        proprietario = Proprietario.objects.get(
+            nome_razao_social="Proprietário cadastrado pelo admin"
+        )
+        self.assertEqual(proprietario.empresa, self.empresa)
 
     def test_filial_exige_descricao(self):
         dados = {"tipo": "FILIAL", "descricao_filial": ""}
@@ -363,17 +371,37 @@ class FluxoAdministrativoTests(TestCase):
         self.assertContains(resposta, "Visão geral")
         self.assertContains(resposta, "Selecionar empresa")
         self.assertContains(resposta, reverse("selecionar_empresa"))
+        self.assertContains(resposta, "Trocar empresa")
 
         self.client.post(reverse("selecionar_empresa"), {"empresa": self.empresa.pk})
         self.assertEqual(self.client.get(reverse("inicio")).status_code, 200)
 
         resposta = self.client.get(reverse("novo_registro", args=["upcs"]))
-        campo = resposta.context["formulario"].fields["empresa"]
-        self.assertEqual(campo.initial, self.empresa.pk)
+        self.assertNotIn("empresa", resposta.context["formulario"].fields)
 
         resposta = self.client.get(reverse("lista_registros", args=["fazendas"]))
         self.assertContains(resposta, "Fazenda da unidade")
         self.assertContains(resposta, "Fazenda de outra empresa")
+        self.assertIn("Empresa", resposta.context["colunas"])
+
+    def test_coluna_empresa_nao_aparece_na_lista_do_gestor(self):
+        self.client.force_login(self.gestor)
+
+        resposta = self.client.get(reverse("lista_registros", args=["fazendas"]))
+
+        self.assertNotIn("Empresa", resposta.context["colunas"])
+        self.assertNotContains(resposta, '<th scope="col">Empresa</th>')
+
+    def test_admin_sem_empresa_ativa_e_redirecionado_ao_seletor(self):
+        self.client.force_login(self.administrador)
+
+        resposta = self.client.get(reverse("novo_registro", args=["fazendas"]))
+
+        self.assertRedirects(
+            resposta,
+            f"{reverse('selecionar_empresa')}?proximo={reverse('novo_registro', args=['fazendas'])}",
+            fetch_redirect_response=False,
+        )
 
     def test_administrador_abre_cadastros_sem_escolher_empresa(self):
         self.client.force_login(self.administrador)
@@ -655,6 +683,28 @@ class FluxoAdministrativoTests(TestCase):
         self.assertContains(resposta, 'name="proprietario"')
         self.assertNotContains(resposta, 'name="relacao"')
 
+    def test_fazenda_cadastra_numero_de_matricula(self):
+        formulario = FazendaGestorForm(
+            {
+                "proprietario": self.proprietario_proprio.pk,
+                "nome": "Fazenda com matrícula",
+                "area_total_ha": "15.2500",
+                "estado": self.estado.pk,
+                "municipio": self.municipio.pk,
+                "numero_matricula": "12.345",
+            },
+            empresa=self.empresa,
+        )
+
+        self.assertTrue(formulario.is_valid(), formulario.errors)
+        fazenda = formulario.save(commit=False)
+        fazenda.empresa = self.empresa
+        fazenda.save()
+
+        self.assertEqual(
+            Fazenda.objects.get(pk=fazenda.pk).numero_matricula, "12.345"
+        )
+
     def test_proprietario_do_gestor_valida_duplicidade_e_municipio_opcional(self):
         self.client.force_login(self.gestor)
         url = reverse("novo_registro", args=["proprietarios"])
@@ -711,18 +761,51 @@ class FluxoAdministrativoTests(TestCase):
         self.assertEqual(fornecedor.empresa, self.empresa)
         self.assertEqual(fornecedor.tipos(), "Serviço")
 
-    def test_plantio_exige_cadastro_ou_dispensa_e_calcula_idade(self):
+    def test_plantio_nao_exige_cadastro_ou_dispensa_e_aceita_idade_informada(self):
         formulario = PlantioGestorForm(
-            {"fazenda": self.fazenda_propria.pk, "origem": "EXOTICA", "rotacao": 1},
+            {
+                "fazenda": self.fazenda_propria.pk,
+                "origem": "EXOTICA",
+                "rotacao": 1,
+                "idade_anos": "9",
+            },
             empresa=self.empresa,
         )
-        self.assertFalse(formulario.is_valid())
-        self.assertIn("numero_cadastro", formulario.errors)
+        self.assertNotIn("numero_cadastro", formulario.fields)
+        self.assertNotIn("motivo_dispensa", formulario.fields)
+        self.assertIn("idade_anos", formulario.fields)
+        self.assertTrue(formulario.is_valid(), formulario.errors)
+        self.assertEqual(formulario.cleaned_data["idade_anos"], 9)
+        plantio = formulario.save(commit=False)
+        plantio.empresa = self.empresa
+        plantio.save()
+        self.assertEqual(Plantio.objects.get(pk=plantio.pk).idade_anos, 9)
+
+    def test_campos_de_area_e_idade_ficam_em_caracteristicas_e_fazenda_ocupa_largura(self):
+        formulario = PlantioGestorForm(empresa=self.empresa)
+        secao_caracteristicas = next(
+            secao for secao in formulario.secoes if secao["titulo"] == "Características"
+        )
+        self.assertIn("area_ha", [campo.name for campo in secao_caracteristicas["campos"]])
+        self.assertIn(
+            "idade_anos", [campo.name for campo in secao_caracteristicas["campos"]]
+        )
+
+        self.client.force_login(self.gestor)
+        resposta = self.client.get(reverse("novo_registro", args=["plantios"]))
+
+        self.assertContains(resposta, 'class="field field-wide"')
+
+        tela_talhoes = self.client.get(reverse("novo_registro", args=["talhoes"]))
+        self.assertContains(
+            tela_talhoes,
+            f'data-plantios-url="{reverse("plantios_por_fazenda")}"',
+        )
+        self.assertContains(tela_talhoes, "/static/sistema/app.js?v=8")
 
         outra = PlantioGestorForm(
             {
                 "fazenda": self.fazenda_alheia.pk,
-                "numero_cadastro": "PL1",
                 "origem": "EXOTICA",
                 "rotacao": 1,
             },
@@ -731,22 +814,74 @@ class FluxoAdministrativoTests(TestCase):
         self.assertFalse(outra.is_valid())
         self.assertIn("fazenda", outra.errors)
 
-        hoje = timezone.localdate()
-        plantio = Plantio(data_plantio=hoje.replace(year=hoje.year - 9))
-        self.assertEqual(plantio.idade_anos(), 9)
+    def test_seletores_de_fazenda_exibem_numero_da_matricula(self):
+        fazenda_com_matricula = Fazenda.objects.create(
+            empresa=self.empresa,
+            proprietario=self.proprietario_proprio,
+            nome=self.fazenda_propria.nome,
+            area_total_ha="3.0000",
+            municipio=self.municipio,
+            numero_matricula="12.345",
+        )
+        self.fazenda_propria.numero_matricula = "67.890"
+        self.fazenda_propria.save(update_fields=["numero_matricula"])
+        self.client.force_login(self.gestor)
+
+        for recurso in ("plantios", "talhoes"):
+            with self.subTest(recurso=recurso):
+                resposta = self.client.get(reverse("novo_registro", args=[recurso]))
+
+                self.assertEqual(resposta.status_code, 200)
+                self.assertContains(resposta, "Fazenda da unidade (Matrícula 67.890)")
+                self.assertContains(resposta, "Fazenda da unidade (Matrícula 12.345)")
+                self.assertContains(
+                    resposta, f'value="{self.fazenda_propria.pk}"'
+                )
+                self.assertContains(
+                    resposta, f'value="{fazenda_com_matricula.pk}"'
+                )
+
+    def test_lista_de_plantios_exibe_idade_informada(self):
+        Plantio.objects.create(
+            empresa=self.empresa,
+            fazenda=self.fazenda_propria,
+            idade_anos=9,
+        )
+        self.client.force_login(self.gestor)
+
+        resposta = self.client.get(reverse("lista_registros", args=["plantios"]))
+
+        self.assertContains(resposta, "<td>9</td>")
+        self.assertNotContains(resposta, "<bound method Plantio.idade_anos")
+        self.assertNotContains(resposta, "Cadastro MG Florestas")
 
     def test_talhao_valida_geojson_plantio_da_fazenda_e_duplicidade(self):
         plantio = Plantio.objects.create(
             empresa=self.empresa,
             fazenda=self.fazenda_propria,
-            numero_cadastro="PL1",
+        )
+        plantio_outra_fazenda = Plantio.objects.create(
+            empresa=self.empresa,
+            fazenda=self.fazenda_alheia,
         )
         base = {
             "fazenda": self.fazenda_propria.pk,
             "plantio": plantio.pk,
             "identificacao": "T01",
             "area_ha": "2.5",
+            "volume_m3": "10",
         }
+        formulario = TalhaoGestorForm(base, empresa=self.empresa)
+        self.assertEqual(
+            list(formulario.fields["plantio"].queryset), [plantio]
+        )
+        outro_plantio = TalhaoGestorForm(
+            {**base, "plantio": plantio_outra_fazenda.pk},
+            empresa=self.empresa,
+        )
+        self.assertFalse(outro_plantio.is_valid())
+        self.assertIn("plantio", outro_plantio.errors)
+
         invalido = TalhaoGestorForm(
             {**base, "geometria": "{quebrado"}, empresa=self.empresa
         )
@@ -777,6 +912,40 @@ class FluxoAdministrativoTests(TestCase):
         )
         self.assertFalse(cruzado.is_valid())
         self.assertIn("plantio", cruzado.errors)
+
+    def test_api_de_plantios_retorna_apenas_os_da_fazenda(self):
+        plantio_proprio = Plantio.objects.create(
+            empresa=self.empresa,
+            fazenda=self.fazenda_propria,
+        )
+        Plantio.objects.create(
+            empresa=self.outra_empresa,
+            fazenda=self.fazenda_alheia,
+        )
+        self.client.force_login(self.gestor)
+
+        resposta = self.client.get(
+            reverse("plantios_por_fazenda"),
+            {"fazenda": self.fazenda_propria.pk},
+        )
+
+        self.assertEqual(resposta.status_code, 200)
+        self.assertEqual(
+            resposta.json()["plantios"],
+            [{"codigo": plantio_proprio.pk, "nome": str(plantio_proprio)}],
+        )
+
+        fazenda_alheia = self.client.get(
+            reverse("plantios_por_fazenda"),
+            {"fazenda": self.fazenda_alheia.pk},
+        )
+        self.assertEqual(fazenda_alheia.status_code, 404)
+
+        invalida = self.client.get(
+            reverse("plantios_por_fazenda"),
+            {"fazenda": "invalida"},
+        )
+        self.assertEqual(invalida.status_code, 400)
 
     def test_upc_calcula_capacidade_e_exige_fazenda_da_empresa(self):
         dados = {
@@ -817,20 +986,81 @@ class FluxoAdministrativoTests(TestCase):
             "registro_conselho": "CREA 1",
             "numero_art": "ART1",
             "area_ha": "50",
-            "metodo_amostragem": "CASUAL_SIMPLES",
-            "numero_parcelas": 7,
             "volume_total": "6000",
             "numero_arvores": "10000",
         }
         form = InventarioFlorestalGestorForm(base, empresa=self.empresa)
+        self.assertTrue(form.fields["vmi"].disabled)
+        self.assertNotIn("upc", form.fields)
+        for campo in (
+            "metodo_amostragem",
+            "numero_parcelas",
+            "area_parcela_m2",
+            "equacao_volume",
+            "fator_forma",
+            "equacao_hipsometrica",
+            "nivel_probabilidade",
+            "t_student",
+            "erro_padrao_media",
+            "erro_amostragem_pct",
+            "ic_inferior_m3",
+            "ic_superior_m3",
+        ):
+            self.assertNotIn(campo, form.fields)
+        campos_removidos = {
+            "upc",
+            "metodo_amostragem",
+            "numero_parcelas",
+            "area_parcela_m2",
+            "equacao_volume",
+            "fator_forma",
+            "equacao_hipsometrica",
+            "latitude",
+            "longitude",
+            "nivel_probabilidade",
+            "t_student",
+            "erro_padrao_media",
+            "erro_amostragem_pct",
+            "ic_inferior_m3",
+            "ic_superior_m3",
+        }
+        self.assertNotIn("Amostragem", [secao["titulo"] for secao in form.secoes])
+        self.assertNotIn("Estatística", [secao["titulo"] for secao in form.secoes])
         self.assertTrue(form.is_valid(), form.errors)
         inventario = form.save(commit=False)
         inventario.empresa = self.empresa
+        inventario.usuario_inclusao = self.gestor
         inventario.save()
+        self.assertFalse(any(hasattr(inventario, campo) for campo in campos_removidos))
         self.assertEqual(inventario.volume_ha, 120)
         self.assertEqual(inventario.numero_arvores_ha, 200)
         self.assertEqual(inventario.vmi, Decimal("0.6"))
         self.assertEqual(inventario.volume_st(), Decimal("9000.00"))
+        formulario_edicao = InventarioFlorestalGestorForm(
+            instance=inventario,
+            empresa=self.empresa,
+        )
+        self.assertEqual(formulario_edicao["vmi"].value(), Decimal("0.6"))
+
+        self.client.force_login(self.gestor)
+        pagina = self.client.get(reverse("novo_registro", args=["inventarios"]))
+        self.assertNotContains(pagina, 'name="upc"')
+        self.assertNotContains(pagina, "Estatística")
+        self.assertNotContains(pagina, "Amostragem")
+        edicao = self.client.get(
+            reverse("editar_registro", args=["inventarios", inventario.pk])
+        )
+        self.assertContains(edicao, 'name="vmi"')
+        tabela = self.client.get(reverse("lista_registros", args=["inventarios"]))
+        for cabecalho in (
+            "Nível de probabilidade",
+            "t de Student",
+            "Erro-padrão da média",
+            "Erro de amostragem",
+            "IC inferior",
+            "IC superior",
+        ):
+            self.assertNotContains(tabela, cabecalho)
 
         repetido = InventarioFlorestalGestorForm(base, empresa=self.empresa)
         self.assertFalse(repetido.is_valid())
@@ -856,6 +1086,81 @@ class FluxoAdministrativoTests(TestCase):
         registro.save()
         self.assertEqual(registro.volume_ha, 120)
 
+        fazenda_talhoes_inventario = Fazenda.objects.create(
+            empresa=self.empresa,
+            proprietario=self.proprietario_proprio,
+            nome="Fazenda auxiliar",
+            area_total_ha="10",
+            municipio=self.municipio,
+        )
+        talhao_calculado = Talhao.objects.create(
+            empresa=self.empresa,
+            fazenda=self.fazenda_propria,
+            identificacao="T2",
+            area_ha="5",
+            volume_m3="250",
+        )
+        Talhao.objects.create(
+            empresa=self.empresa,
+            fazenda=fazenda_talhoes_inventario,
+            identificacao="T1",
+            area_ha="10",
+            volume_m3="300",
+        )
+        formulario_com_inventario = InventarioTalhaoGestorForm(
+            {"inventario": inventario.pk},
+            empresa=self.empresa,
+        )
+        self.assertEqual(
+            list(
+                formulario_com_inventario.fields["talhao"].queryset.values_list(
+                    "pk", flat=True
+                )
+            ),
+            [talhao.pk, talhao_calculado.pk],
+        )
+        self.client.force_login(self.gestor)
+        talhoes_por_inventario = self.client.get(
+            reverse("talhoes_por_inventario"),
+            {"inventario": inventario.pk},
+        )
+        self.assertEqual(talhoes_por_inventario.status_code, 200)
+        dados_talhoes = {
+            item["codigo"]: item
+            for item in talhoes_por_inventario.json()["talhoes"]
+        }
+        self.assertEqual(set(dados_talhoes), {talhao.pk, talhao_calculado.pk})
+        self.assertEqual(dados_talhoes[talhao_calculado.pk]["area_ha"], "5.0000")
+        self.assertEqual(
+            dados_talhoes[talhao_calculado.pk]["volume_total"], "250.000"
+        )
+        self.assertEqual(
+            dados_talhoes[talhao_calculado.pk]["saldo_a_retirar_m3"], "250.000"
+        )
+        self.assertEqual(dados_talhoes[talhao_calculado.pk]["numero_arvores"], "1000.00")
+        formulario_com_talhao = InventarioTalhaoGestorForm(
+            initial={
+                "inventario": inventario.pk,
+                "talhao": talhao_calculado.pk,
+            },
+            empresa=self.empresa,
+        )
+        self.assertEqual(
+            formulario_com_talhao["saldo_a_retirar_m3"].value(),
+            Decimal("250.000"),
+        )
+
+        formulario_novo = self.client.get(
+            reverse("novo_registro", args=["inventarios-talhao"])
+        )
+        self.assertContains(
+            formulario_novo,
+            f'data-talhoes-url="{reverse("talhoes_por_inventario")}"',
+        )
+        self.assertContains(formulario_novo, 'id="talhao-status"')
+        self.assertContains(formulario_novo, 'name="saldo_a_retirar_m3"')
+        self.assertContains(formulario_novo, "Saldo a retirar (m³)")
+
         duplicado = InventarioTalhaoGestorForm(dados_talhao, empresa=self.empresa)
         self.assertFalse(duplicado.is_valid())
         self.assertIn("talhao", duplicado.errors)
@@ -871,32 +1176,87 @@ class FluxoAdministrativoTests(TestCase):
             "volume_forno_mdc": "1",
             "ciclo_producao_dias": 1,
         }
+        outra_fazenda = Fazenda.objects.create(
+            empresa=self.empresa,
+            proprietario=self.proprietario_proprio,
+            nome="Fazenda B",
+            area_total_ha="1",
+            municipio=self.municipio,
+        )
         a = UPC.objects.create(empresa=self.empresa, nome="UPC A", **dados)
-        b = UPC.objects.create(empresa=self.empresa, nome="UPC B", **dados)
+        b = UPC.objects.create(
+            empresa=self.empresa,
+            nome="UPC B",
+            **{**dados, "fazenda": outra_fazenda},
+        )
         gestor.upcs.add(a)
         self.assertEqual(list(gestor.upcs_permitidas()), [a])
         self.client.force_login(gestor)
         resposta = self.client.get(reverse("lista_registros", args=["upcs"]))
         self.assertContains(resposta, "UPC A")
         self.assertNotContains(resposta, "UPC B")
+        autorizacao_a = AutorizacaoAmbiental.objects.create(
+            empresa=self.empresa,
+            numero="AUT-A",
+            produto="LENHA",
+            unidade_volume="MST",
+            volume_declarado="10",
+            data_emissao="2026-01-01",
+        )
+        autorizacao_a.upcs.add(a)
+        autorizacao_b = AutorizacaoAmbiental.objects.create(
+            empresa=self.empresa,
+            numero="AUT-B",
+            produto="LENHA",
+            unidade_volume="MST",
+            volume_declarado="10",
+            data_emissao="2026-01-01",
+        )
+        autorizacao_b.upcs.add(b)
+        autorizacoes_visiveis = self.client.get(
+            reverse("lista_registros", args=["autorizacoes"])
+        )
+        self.assertContains(autorizacoes_visiveis, "AUT-A")
+        self.assertNotContains(autorizacoes_visiveis, "AUT-B")
         inventario = {
             "empresa": self.empresa,
+            "usuario_inclusao": self.gestor,
             "fazenda": fazenda,
             "data_inventario": "2026-01-01",
             "responsavel_tecnico": "Eng",
             "registro_conselho": "CREA",
             "numero_art": "A",
             "area_ha": "1",
-            "numero_parcelas": 1,
             "volume_total": "1",
             "numero_arvores": "1",
         }
-        InventarioFlorestal.objects.create(lote="DA-A", upc=a, **inventario)
-        InventarioFlorestal.objects.create(lote="DA-B", upc=b, **inventario)
+        InventarioFlorestal.objects.create(lote="DA-A", **inventario)
+        InventarioFlorestal.objects.create(
+            lote="DA-B",
+            **{**inventario, "fazenda": outra_fazenda},
+        )
         resposta = self.client.get(reverse("lista_registros", args=["inventarios"]))
         self.assertContains(resposta, "DA-A")
         self.assertNotContains(resposta, "DA-B")
         self.assertContains(self.client.get(reverse("inicio")), "UPC A")
+        criado = self.client.post(
+            reverse("novo_registro", args=["inventarios"]),
+            {
+                "fazenda": fazenda.pk,
+                "lote": "DA-C",
+                "data_inventario": "2026-02-01",
+                "responsavel_tecnico": "Eng",
+                "registro_conselho": "CREA",
+                "numero_art": "C",
+                "area_ha": "1",
+                "volume_total": "1",
+                "numero_arvores": "1",
+            },
+        )
+        self.assertEqual(criado.status_code, 302)
+        inventario_criado = InventarioFlorestal.objects.get(lote="DA-C")
+        self.assertEqual(inventario_criado.fazenda_id, fazenda.pk)
+        self.assertEqual(inventario_criado.usuario_inclusao_id, gestor.pk)
         novo = self.client.get(reverse("novo_registro", args=["upcs"]))
         self.assertContains(novo, "/gestao/fazendas/novo/?proximo=")
 
@@ -910,7 +1270,7 @@ class FluxoAdministrativoTests(TestCase):
             registro_conselho="CREA",
             numero_art="A9",
             area_ha="10",
-            numero_parcelas=5,
+            usuario_inclusao=self.gestor,
             volume_total="100",
             numero_arvores="200",
         )
@@ -974,6 +1334,18 @@ class FluxoAdministrativoTests(TestCase):
         self.assertIn("inventario", repetido.errors)
 
     def test_transporte_lenha_calcula_volume_e_custo(self):
+        talhao_novo_form = TalhaoGestorForm(empresa=self.empresa)
+        self.assertIn("saldo_a_retirar_m3", talhao_novo_form.fields)
+        self.assertTrue(talhao_novo_form.fields["saldo_a_retirar_m3"].disabled)
+        self.assertIn(
+            "transportes",
+            talhao_novo_form.fields["saldo_a_retirar_m3"].help_text,
+        )
+        self.client.force_login(self.gestor)
+        formulario_talhao = self.client.get(reverse("novo_registro", args=["talhoes"]))
+        self.assertContains(formulario_talhao, "Saldo a retirar (m³)")
+        self.assertContains(formulario_talhao, "volume já registrado nos transportes")
+
         autorizacao = AutorizacaoAmbiental.objects.create(
             empresa=self.empresa,
             numero="A-2",
@@ -989,6 +1361,7 @@ class FluxoAdministrativoTests(TestCase):
             fazenda=self.fazenda_propria,
             identificacao="T1",
             area_ha="5",
+            volume_m3=Decimal("25"),
         )
         base = {
             "autorizacao": autorizacao.pk,
@@ -1024,6 +1397,44 @@ class FluxoAdministrativoTests(TestCase):
         self.assertEqual(transporte.volume_m3, Decimal("20.000"))
         self.assertEqual(transporte.valor_mst, Decimal("20.0000"))
         self.assertEqual(transporte.valor_total, Decimal("600.00"))
+        self.assertEqual(talhao.saldo_a_retirar_m3, Decimal("5.000"))
+
+        saldo_form = TalhaoGestorForm(instance=talhao, empresa=self.empresa)
+        self.assertEqual(
+            saldo_form["saldo_a_retirar_m3"].value(), Decimal("5.000")
+        )
+        volume_reduzido = TalhaoGestorForm(
+            {
+                "fazenda": self.fazenda_propria.pk,
+                "identificacao": "T1",
+                "area_ha": "5",
+                "volume_m3": "19",
+            },
+            instance=talhao,
+            empresa=self.empresa,
+        )
+        self.assertTrue(volume_reduzido.is_valid(), volume_reduzido.errors)
+
+        excedente = TransporteLenhaGestorForm(
+            {
+                **base,
+                "volume_mst": "9",
+                "destino": "UPC",
+                "upc": upc.pk,
+                "tipo_transporte": "PROPRIO",
+                "valor_m3": "30",
+            },
+            empresa=self.empresa,
+        )
+        self.assertTrue(excedente.is_valid(), excedente.errors)
+        transporte_excedente = excedente.save(commit=False)
+        transporte_excedente.empresa = self.empresa
+        transporte_excedente.save()
+        self.assertEqual(transporte_excedente.volume_m3, Decimal("6.000"))
+        self.assertEqual(
+            Talhao.objects.get(pk=talhao.pk).saldo_a_retirar_m3,
+            Decimal("-1.000"),
+        )
 
     def test_expedicao_baixa_saldo_em_duas_etapas(self):
         autorizacao = AutorizacaoAmbiental.objects.create(
@@ -1101,7 +1512,7 @@ class FluxoAdministrativoTests(TestCase):
             registro_conselho="CREA",
             numero_art="A1",
             area_ha="10",
-            numero_parcelas=5,
+            usuario_inclusao=self.gestor,
             volume_total="100",
             numero_arvores="200",
         )
@@ -1118,7 +1529,7 @@ class FluxoAdministrativoTests(TestCase):
         }
         incompleta = AutorizacaoAmbientalGestorForm(base, empresa=self.empresa)
         self.assertFalse(incompleta.is_valid())
-        for campo in ("fazenda", "base_volume", "upc"):
+        for campo in ("fazenda", "base_volume", "upcs"):
             self.assertIn(campo, incompleta.errors)
 
         upc = UPC.objects.create(
@@ -1131,18 +1542,106 @@ class FluxoAdministrativoTests(TestCase):
             volume_forno_mdc="1",
             ciclo_producao_dias=8,
         )
+        upc_outra_empresa = UPC.objects.create(
+            empresa=self.outra_empresa,
+            fazenda=self.fazenda_alheia,
+            nome="U2",
+            utm_leste="1",
+            utm_norte="1",
+            numero_fornos=1,
+            volume_forno_mdc="1",
+            ciclo_producao_dias=8,
+        )
+        self.client.force_login(self.administrador)
+        self.client.post(
+            reverse("selecionar_empresa"), {"empresa": self.empresa.pk}
+        )
+        pagina_autorizacao = self.client.get(
+            reverse("novo_registro", args=["autorizacoes"])
+        )
+        self.assertEqual(pagina_autorizacao.status_code, 200)
+        opcoes_upc = pagina_autorizacao.context["formulario"].fields[
+            "upcs"
+        ].queryset
+        self.assertEqual(list(opcoes_upc), [upc])
+        self.assertNotIn(upc_outra_empresa, opcoes_upc)
+        self.assertFalse(
+            pagina_autorizacao.context["formulario"].fields["upcs"].widget.allow_multiple_selected
+        )
+        self.assertNotIn(
+            "Colheita",
+            [
+                secao["titulo"]
+                for secao in pagina_autorizacao.context["formulario"].secoes
+            ],
+        )
+        for campo_removido in (
+            "area_colher_ha",
+            "tipo_colheita",
+            "percentual_desbaste",
+            "possui_subbosque",
+            "volume_subbosque_m3_ha",
+            "area_basal_acima_10",
+        ):
+            self.assertNotIn(
+                campo_removido, pagina_autorizacao.context["formulario"].fields
+            )
+
+        fazenda_origem_2 = Fazenda.objects.create(
+            empresa=self.empresa,
+            proprietario=self.proprietario_proprio,
+            nome="Fazenda de origem 2",
+            area_total_ha="10",
+            municipio=self.municipio,
+        )
+        inventario_2 = InventarioFlorestal.objects.create(
+            empresa=self.empresa,
+            fazenda=fazenda_origem_2,
+            lote="L2",
+            data_inventario="2026-01-02",
+            responsavel_tecnico="Eng",
+            registro_conselho="CREA",
+            numero_art="A2",
+            area_ha="10",
+            usuario_inclusao=self.gestor,
+            volume_total="100",
+            numero_arvores="200",
+        )
+        upc_outra_fazenda = UPC.objects.create(
+            empresa=self.empresa,
+            fazenda=fazenda_origem_2,
+            nome="U3",
+            utm_leste="1",
+            utm_norte="1",
+            numero_fornos=1,
+            volume_forno_mdc="1",
+            ciclo_producao_dias=8,
+        )
         completa = {
             **base,
             "fazenda": self.fazenda_propria.pk,
             "base_volume": "INVENTARIO",
             "inventario": inventario.pk,
-            "upc": upc.pk,
+            "upcs": [upc.pk],
         }
+        dados_multiplos_producao = QueryDict("", mutable=True)
+        dados_multiplos_producao.update(completa)
+        dados_multiplos_producao.setlist(
+            "upcs", [str(upc.pk), str(upc_outra_fazenda.pk)]
+        )
+        formulario_multiplo_producao = AutorizacaoAmbientalGestorForm(
+            dados_multiplos_producao,
+            empresa=self.empresa,
+        )
+        self.assertFalse(formulario_multiplo_producao.is_valid())
+        self.assertIn("upcs", formulario_multiplo_producao.errors)
+
         form = AutorizacaoAmbientalGestorForm(completa, empresa=self.empresa)
         self.assertTrue(form.is_valid(), form.errors)
         autorizacao = form.save(commit=False)
         autorizacao.empresa = self.empresa
         autorizacao.save()
+        form.save_m2m()
 
         repetida = AutorizacaoAmbientalGestorForm(
             {**completa, "numero": "outro"}, empresa=self.empresa
@@ -1151,10 +1650,46 @@ class FluxoAdministrativoTests(TestCase):
         self.assertIn("inventario", repetida.errors)
 
         nota = AutorizacaoAmbientalGestorForm(
-            {**base, "numero": "NF1", "modalidade": "NOTA_FISCAL"},
+            {
+                **base,
+                "numero": "NF1",
+                "modalidade": "NOTA_FISCAL",
+                "upcs": [upc.pk, upc_outra_fazenda.pk],
+            },
             empresa=self.empresa,
         )
         self.assertTrue(nota.is_valid(), nota.errors)
+        self.assertTrue(nota.fields["upcs"].widget.allow_multiple_selected)
+        nota_autorizacao = nota.save(commit=False)
+        nota_autorizacao.empresa = self.empresa
+        nota_autorizacao.save()
+        nota.save_m2m()
+        self.assertEqual(
+            set(nota_autorizacao.upcs.values_list("pk", flat=True)),
+            {upc.pk, upc_outra_fazenda.pk},
+        )
+
+        segunda_fazenda_mesma_upc = AutorizacaoAmbientalGestorForm(
+            {
+                **completa,
+                "numero": "2100.01.0004433/2026-31",
+                "fazenda": fazenda_origem_2.pk,
+                "inventario": inventario_2.pk,
+            },
+            empresa=self.empresa,
+        )
+        self.assertTrue(
+            segunda_fazenda_mesma_upc.is_valid(),
+            segunda_fazenda_mesma_upc.errors,
+        )
+        segunda_autorizacao = segunda_fazenda_mesma_upc.save(commit=False)
+        segunda_autorizacao.empresa = self.empresa
+        segunda_autorizacao.save()
+        segunda_fazenda_mesma_upc.save_m2m()
+        self.assertEqual(
+            upc.autorizacoes.filter(modalidade="PRODUCAO").count(),
+            2,
+        )
 
         mst = AutorizacaoAmbiental(unidade_volume="MST", volume_declarado=Decimal(150))
         self.assertEqual(mst.volume_em_m3(), Decimal("100.000"))
@@ -1280,6 +1815,30 @@ class FluxoAdministrativoTests(TestCase):
 
         self.assertContains(resposta, "Defina uma nova senha")
         self.assertContains(resposta, "Salvar nova senha")
+
+    def test_cadastro_rapido_volta_ao_formulario_com_registro_selecionado(self):
+        self.client.force_login(self.administrador)
+        self.client.post(reverse("selecionar_empresa"), {"empresa": self.empresa.pk})
+        origem = reverse("novo_registro", args=["upcs"])
+        pagina = self.client.get(origem)
+        self.assertContains(pagina, "data-rascunho-link")
+        self.assertContains(pagina, "campo=fazenda")
+
+        resposta = self.client.post(
+            reverse("novo_registro", args=["proprietarios"])
+            + f"?proximo={origem}&campo=proprietario",
+            {
+                "nome_razao_social": "Novo Dono",
+                "cpf_cnpj": "52998224725",
+            },
+        )
+
+        novo = Proprietario.objects.get(nome_razao_social="Novo Dono")
+        self.assertRedirects(
+            resposta,
+            f"{origem}?selecionar=proprietario%3A{novo.pk}",
+            fetch_redirect_response=False,
+        )
 
     def test_empresa_formata_cnpj_cep_e_telefone(self):
         form = EmpresaForm(

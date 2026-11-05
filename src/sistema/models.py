@@ -5,7 +5,6 @@ from decimal import Decimal
 from django.conf import settings
 from django.contrib.auth.models import AbstractUser, UserManager
 from django.db import models, transaction
-from django.utils import timezone
 
 FATOR_MST_POR_M3 = Decimal("1.5")
 
@@ -280,6 +279,9 @@ class Fazenda(RegistroAuditavel):
     referencia_local = models.CharField(max_length=255, blank=True)
     area_total_ha = models.DecimalField(max_digits=12, decimal_places=4)
     arrendado = models.BooleanField(default=False)
+    numero_matricula = models.CharField(
+        "Número da matrícula", max_length=50, blank=True
+    )
     numero_car = models.CharField("Número do CAR", max_length=60, blank=True)
     tipo_documento_posse = models.CharField(max_length=30, blank=True)
     numero_documento_posse = models.CharField(max_length=50, blank=True)
@@ -367,10 +369,9 @@ class Plantio(RegistroAuditavel):
     fazenda = models.ForeignKey(
         Fazenda, on_delete=models.PROTECT, related_name="plantios"
     )
-    numero_cadastro = models.CharField(
-        "Cadastro MG Florestas", max_length=30, blank=True
+    idade_anos = models.PositiveSmallIntegerField(
+        "Idade (anos)", null=True, blank=True
     )
-    motivo_dispensa = models.CharField(max_length=100, blank=True)
     especie = models.CharField(max_length=60, blank=True)
     origem = models.CharField(
         max_length=10, choices=OrigemFloresta.choices, default=OrigemFloresta.EXOTICA
@@ -395,25 +396,11 @@ class Plantio(RegistroAuditavel):
     observacao = models.CharField(max_length=255, blank=True)
 
     class Meta:
-        ordering = ["fazenda__nome", "numero_cadastro"]
+        ordering = ["fazenda__nome", "codigo"]
         verbose_name_plural = "plantios"
-        constraints = [
-            models.UniqueConstraint(
-                fields=["empresa", "numero_cadastro"],
-                condition=~models.Q(numero_cadastro=""),
-                name="plantio_cadastro_por_empresa",
-            )
-        ]
 
     def __str__(self) -> str:
-        return self.numero_cadastro or f"Plantio {self.codigo} - {self.fazenda}"
-
-    def idade_anos(self) -> int | None:
-        base = self.data_ultimo_corte or self.data_plantio
-        if base is None:
-            return None
-        hoje = timezone.localdate()
-        return hoje.year - base.year - ((hoje.month, hoje.day) < (base.month, base.day))
+        return f"Plantio {self.codigo} - {self.fazenda}"
 
 
 class Talhao(RegistroAuditavel):
@@ -433,6 +420,9 @@ class Talhao(RegistroAuditavel):
     )
     identificacao = models.CharField(max_length=30)
     area_ha = models.DecimalField(max_digits=12, decimal_places=4)
+    volume_m3 = models.DecimalField(
+        "Volume total (m³)", max_digits=12, decimal_places=3, null=True, blank=True
+    )
     latitude = models.DecimalField(
         max_digits=10, decimal_places=7, null=True, blank=True
     )
@@ -453,6 +443,21 @@ class Talhao(RegistroAuditavel):
 
     def __str__(self) -> str:
         return f"{self.fazenda} - {self.identificacao}"
+
+    @property
+    def volume_retirado_m3(self) -> Decimal:
+        if not self.pk:
+            return Decimal("0.000")
+        retirado = self.transportes_lenha.aggregate(
+            total=models.Sum("volume_m3")
+        )["total"]
+        return retirado or Decimal("0.000")
+
+    @property
+    def saldo_a_retirar_m3(self) -> Decimal | None:
+        if self.volume_m3 is None:
+            return None
+        return self.volume_m3 - self.volume_retirado_m3
 
 
 class UPC(RegistroAuditavel):
@@ -505,13 +510,6 @@ class UPC(RegistroAuditavel):
         )
 
 
-class MetodoAmostragem(models.TextChoices):
-    CASUAL_SIMPLES = "CASUAL_SIMPLES", "Casual simples"
-    ESTRATIFICADA = "ESTRATIFICADA", "Estratificada"
-    SISTEMATICA = "SISTEMATICA", "Sistemática"
-    CENSO = "CENSO", "Censo"
-
-
 def _dividir(numerador: Decimal | None, denominador: Decimal | None) -> Decimal | None:
     if numerador is None or not denominador:
         return None
@@ -523,6 +521,12 @@ class InventarioFlorestal(RegistroAuditavel):
     empresa = models.ForeignKey(
         Empresa, on_delete=models.PROTECT, related_name="inventarios"
     )
+    usuario_inclusao = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="inventarios_incluidos",
+        db_column="codigo_usuario",
+    )
     fornecedor = models.ForeignKey(
         Fornecedor,
         on_delete=models.PROTECT,
@@ -532,13 +536,6 @@ class InventarioFlorestal(RegistroAuditavel):
     )
     fazenda = models.ForeignKey(
         Fazenda, on_delete=models.PROTECT, related_name="inventarios"
-    )
-    upc = models.ForeignKey(
-        "UPC",
-        on_delete=models.PROTECT,
-        related_name="inventarios",
-        null=True,
-        blank=True,
     )
     plantio = models.ForeignKey(
         Plantio,
@@ -555,26 +552,6 @@ class InventarioFlorestal(RegistroAuditavel):
     area_ha = models.DecimalField(max_digits=12, decimal_places=4)
     numero_talhoes = models.PositiveIntegerField(null=True, blank=True)
     especie = models.CharField(max_length=60, blank=True)
-    metodo_amostragem = models.CharField(
-        max_length=30,
-        choices=MetodoAmostragem.choices,
-        default=MetodoAmostragem.CASUAL_SIMPLES,
-    )
-    numero_parcelas = models.PositiveIntegerField()
-    area_parcela_m2 = models.DecimalField(
-        max_digits=10, decimal_places=2, null=True, blank=True
-    )
-    equacao_volume = models.CharField(max_length=200, blank=True)
-    fator_forma = models.DecimalField(
-        max_digits=5, decimal_places=3, null=True, blank=True
-    )
-    equacao_hipsometrica = models.CharField(max_length=255, blank=True)
-    latitude = models.DecimalField(
-        max_digits=10, decimal_places=7, null=True, blank=True
-    )
-    longitude = models.DecimalField(
-        max_digits=10, decimal_places=7, null=True, blank=True
-    )
     volume_total = models.DecimalField(max_digits=14, decimal_places=3)
     numero_arvores = models.DecimalField(max_digits=14, decimal_places=2)
     volume_ha = models.DecimalField(
@@ -591,24 +568,6 @@ class InventarioFlorestal(RegistroAuditavel):
     )
     altura_media_m = models.DecimalField(
         max_digits=6, decimal_places=2, null=True, blank=True
-    )
-    nivel_probabilidade = models.DecimalField(
-        max_digits=5, decimal_places=2, null=True, blank=True
-    )
-    t_student = models.DecimalField(
-        max_digits=6, decimal_places=3, null=True, blank=True
-    )
-    erro_padrao_media = models.DecimalField(
-        max_digits=10, decimal_places=4, null=True, blank=True
-    )
-    erro_amostragem_pct = models.DecimalField(
-        max_digits=6, decimal_places=2, null=True, blank=True
-    )
-    ic_inferior_m3 = models.DecimalField(
-        max_digits=14, decimal_places=3, null=True, blank=True
-    )
-    ic_superior_m3 = models.DecimalField(
-        max_digits=14, decimal_places=3, null=True, blank=True
     )
     observacao = models.CharField(max_length=255, blank=True)
 
@@ -667,14 +626,6 @@ class UnidadeVolume(models.TextChoices):
     MDC = "MDC", "MDC"
     MST = "MST", "MST"
     M3 = "M3", "m³"
-
-
-class TipoColheita(models.TextChoices):
-    CORTE_RASO_SEM_DESTOCA = "CORTE_RASO_SEM_DESTOCA", "Corte raso sem destoca"
-    CORTE_RASO_COM_DESTOCA = "CORTE_RASO_COM_DESTOCA", "Corte raso com destoca"
-    DESTOCA = "DESTOCA", "Destoca"
-    CORTE_SELETIVO = "CORTE_SELETIVO", "Corte seletivo"
-    DESBASTE = "DESBASTE", "Desbaste"
 
 
 class SistemaColheita(models.TextChoices):
@@ -737,11 +688,9 @@ class AutorizacaoAmbiental(RegistroAuditavel):
         null=True,
         blank=True,
     )
-    upc = models.ForeignKey(
+    upcs = models.ManyToManyField(
         UPC,
-        on_delete=models.PROTECT,
         related_name="autorizacoes",
-        null=True,
         blank=True,
     )
     plantio = models.ForeignKey(
@@ -772,21 +721,7 @@ class AutorizacaoAmbiental(RegistroAuditavel):
     fator_conversao = models.DecimalField(
         max_digits=8, decimal_places=4, null=True, blank=True
     )
-    area_colher_ha = models.DecimalField(
-        max_digits=12, decimal_places=4, null=True, blank=True
-    )
-    tipo_colheita = models.CharField(
-        max_length=25, choices=TipoColheita.choices, blank=True
-    )
-    percentual_desbaste = models.DecimalField(
-        max_digits=5, decimal_places=2, null=True, blank=True
-    )
     numero_recibo_sinaflor = models.CharField(max_length=30, blank=True)
-    possui_subbosque = models.BooleanField(default=False)
-    volume_subbosque_m3_ha = models.DecimalField(
-        max_digits=10, decimal_places=2, null=True, blank=True
-    )
-    area_basal_acima_10 = models.BooleanField(default=False)
     data_emissao = models.DateField()
     data_vencimento = models.DateField(null=True, blank=True)
     status = models.CharField(
@@ -817,6 +752,9 @@ class AutorizacaoAmbiental(RegistroAuditavel):
 
     def __str__(self) -> str:
         return self.numero
+
+    def lista_upcs(self) -> str:
+        return ", ".join(str(upc) for upc in self.upcs.all())
 
     def volume_em_m3(self) -> Decimal | None:
         if self.unidade_volume == UnidadeVolume.M3:

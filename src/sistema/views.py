@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
@@ -159,12 +161,12 @@ ATALHOS_DE_CADASTRO = {
     "categoria_pai": "categorias-custo",
 }
 FILTROS_POR_UPC = {
-    InventarioFlorestal: lambda upcs: Q(upc__in=upcs),
-    InventarioTalhao: lambda upcs: Q(inventario__upc__in=upcs),
-    AutorizacaoAmbiental: lambda upcs: Q(upc__in=upcs),
-    Expedicao: lambda upcs: Q(autorizacao__upc__in=upcs),
-    TransporteLenha: lambda upcs: Q(upc__in=upcs) | Q(autorizacao__upc__in=upcs),
-    Colheita: lambda upcs: Q(inventario__upc__in=upcs),
+    InventarioFlorestal: lambda upcs: Q(fazenda__upcs__in=upcs),
+    InventarioTalhao: lambda upcs: Q(inventario__fazenda__upcs__in=upcs),
+    AutorizacaoAmbiental: lambda upcs: Q(upcs__in=upcs),
+    Expedicao: lambda upcs: Q(autorizacao__upcs__in=upcs),
+    TransporteLenha: lambda upcs: Q(upc__in=upcs) | Q(autorizacao__upcs__in=upcs),
+    Colheita: lambda upcs: Q(inventario__fazenda__upcs__in=upcs),
     ProducaoCarvao: lambda upcs: Q(upc__in=upcs),
 }
 
@@ -377,7 +379,6 @@ RECURSOS: dict[str, dict[str, Any]] = {
         "modelo": Plantio,
         "formulario": PlantioForm,
         "colunas": [
-            ("Cadastro", "numero_cadastro"),
             ("Fazenda", "fazenda"),
             ("Espécie", "especie"),
             ("Área (ha)", "area_ha"),
@@ -385,7 +386,6 @@ RECURSOS: dict[str, dict[str, Any]] = {
             ("Empresa", "empresa"),
         ],
         "busca": [
-            "numero_cadastro",
             "especie",
             "fazenda__nome",
             "empresa__razao_social",
@@ -401,12 +401,12 @@ RECURSOS: dict[str, dict[str, Any]] = {
             ("Fazenda", "fazenda"),
             ("Plantio", "plantio"),
             ("Área (ha)", "area_ha"),
+            ("Volume (m³)", "volume_m3"),
             ("Empresa", "empresa"),
         ],
         "busca": [
             "identificacao",
             "fazenda__nome",
-            "plantio__numero_cadastro",
             "empresa__razao_social",
         ],
         "somente_admin": False,
@@ -471,6 +471,7 @@ RECURSOS: dict[str, dict[str, Any]] = {
         "formulario": AutorizacaoAmbientalForm,
         "colunas": [
             ("Número", "numero"),
+            ("UPC(s)", "lista_upcs"),
             ("Tipo", "tipo_documento"),
             ("Produto", "produto"),
             ("Volume", "volume_declarado"),
@@ -482,6 +483,7 @@ RECURSOS: dict[str, dict[str, Any]] = {
         "busca": [
             "numero",
             "fazenda__nome",
+            "upcs__nome",
             "numero_dae_expediente",
             "numero_dae_florestal",
             "empresa__razao_social",
@@ -791,6 +793,82 @@ def municipios_por_estado(request: HttpRequest) -> JsonResponse:
     return JsonResponse({"municipios": list(municipios)})
 
 
+@login_required
+def plantios_por_fazenda(request: HttpRequest) -> JsonResponse:
+    configuracao = _configurar_recurso(request, "fazendas")
+    codigo_fazenda = request.GET.get("fazenda", "")
+    if not codigo_fazenda.isdecimal():
+        return JsonResponse(
+            {"erro": "Informe o código de uma fazenda válida."},
+            status=400,
+        )
+    fazenda = get_object_or_404(
+        _queryset_recurso(request, configuracao), pk=codigo_fazenda
+    )
+    plantios = Plantio.objects.filter(
+        fazenda=fazenda,
+        empresa_id=fazenda.empresa_id,
+    ).order_by("codigo")
+    return JsonResponse(
+        {
+            "plantios": [
+                {"codigo": plantio.pk, "nome": str(plantio)}
+                for plantio in plantios
+            ]
+        }
+    )
+
+
+@login_required
+def talhoes_por_inventario(request: HttpRequest) -> JsonResponse:
+    configuracao = _configurar_recurso(request, "inventarios")
+    codigo_inventario = request.GET.get("inventario", "")
+    if not codigo_inventario.isdecimal():
+        return JsonResponse(
+            {"erro": "Informe o código de um inventário válido."},
+            status=400,
+        )
+    inventario = get_object_or_404(
+        _queryset_recurso(request, configuracao), pk=codigo_inventario
+    )
+    talhoes = Talhao.objects.filter(
+        empresa_id=inventario.empresa_id,
+        fazenda_id=inventario.fazenda_id,
+    ).order_by("identificacao")
+    arvores_por_hectare = inventario.numero_arvores_ha
+    if arvores_por_hectare is None and inventario.area_ha:
+        arvores_por_hectare = inventario.numero_arvores / inventario.area_ha
+    return JsonResponse(
+        {
+            "talhoes": [
+                {
+                    "codigo": talhao.pk,
+                    "identificacao": talhao.identificacao,
+                    "area_ha": str(talhao.area_ha),
+                    "volume_total": (
+                        str(talhao.volume_m3) if talhao.volume_m3 is not None else ""
+                    ),
+                    "saldo_a_retirar_m3": (
+                        str(talhao.saldo_a_retirar_m3)
+                        if talhao.saldo_a_retirar_m3 is not None
+                        else ""
+                    ),
+                    "numero_arvores": (
+                        str(
+                            (arvores_por_hectare * talhao.area_ha).quantize(
+                                Decimal("0.01")
+                            )
+                        )
+                        if arvores_por_hectare is not None
+                        else ""
+                    ),
+                }
+                for talhao in talhoes
+            ]
+        }
+    )
+
+
 RECURSOS_DO_OPERADOR = {
     "colheitas",
     "expedicoes",
@@ -868,14 +946,14 @@ def lista_registros(request: HttpRequest, recurso: str) -> HttpResponse:
         objetos = objetos.order_by("pk")
     pagina = Paginator(objetos, 25).get_page(request.GET.get("page"))
     colunas = configuracao["colunas"]
+    if not eh_administrador(usuario_autenticado(request)):
+        colunas = [(rotulo, campo) for rotulo, campo in colunas if campo != "empresa"]
     linhas = [
         {
             "objeto": objeto,
             "valores": [
                 _valor_de_exibicao(
-                    getattr(objeto, campo)()
-                    if campo.startswith("get_")
-                    else getattr(objeto, campo)
+                    valor() if callable(valor := getattr(objeto, campo)) else valor
                 )
                 for _, campo in colunas
             ],
@@ -943,12 +1021,20 @@ def _limitar_upcs(
     modelo: type[Model],
     empresa_fixa: Empresa | None,
 ) -> None:
-    campo = formulario.fields.get("upc")
+    campo = formulario.fields.get("upcs") or formulario.fields.get("upc")
     if campo is None or not empresa_fixa:
         return
-    campo.queryset = usuario_autenticado(request).upcs_permitidas()
+    usuario = usuario_autenticado(request)
+    if eh_administrador(usuario):
+        campo.queryset = UPC.objects.filter(empresa=empresa_fixa)
+    else:
+        campo.queryset = usuario.upcs_permitidas().filter(empresa=empresa_fixa)
     ativa = upc_ativa(request)
     if ativa is not None and modelo in UPC_DO_CONTEXTO:
+        if modelo is AutorizacaoAmbiental:
+            campo.initial = [ativa.pk]
+            formulario.initial["upcs"] = [ativa.pk]
+            return
         # O cadastro sempre pertence à UPC escolhida no acesso.
         campo.queryset = UPC.objects.filter(pk=ativa.pk)
         campo.initial = ativa.pk
@@ -960,7 +1046,7 @@ def _limitar_upcs(
 def _adicionar_atalhos(
     request: HttpRequest, formulario: ModelForm, recurso: str, usuario: Usuario
 ) -> None:
-    retorno = urlencode({"proximo": request.get_full_path()})
+    retorno = urlencode({"proximo": _caminho_sem_selecao(request)})
     for nome_campo, destino in ATALHOS_DE_CADASTRO.items():
         campo = formulario.fields.get(nome_campo)
         restrito = RECURSOS[destino].get("somente_admin")
@@ -970,7 +1056,25 @@ def _adicionar_atalhos(
             continue
         if not eh_administrador(usuario) and not _perfil_acessa(usuario, destino):
             continue
-        campo.atalho_url = f"{reverse('novo_registro', args=[destino])}?{retorno}"
+        campo.atalho_url = (
+            f"{reverse('novo_registro', args=[destino])}?{retorno}"
+            f"&{urlencode({'campo': nome_campo})}"
+        )
+
+
+def _caminho_sem_selecao(request: HttpRequest) -> str:
+    consulta = request.GET.copy()
+    consulta.pop("selecionar", None)
+    texto = consulta.urlencode()
+    return f"{request.path}?{texto}" if texto else request.path
+
+
+def _destino_com_selecao(proximo: str, campo: str, pk: object) -> str:
+    partes = urlsplit(proximo)
+    consulta = [
+        (k, v) for k, v in parse_qsl(partes.query) if k != "selecionar"
+    ] + [("selecionar", f"{campo}:{pk}")]
+    return urlunsplit(partes._replace(query=urlencode(consulta)))
 
 
 @login_required
@@ -980,30 +1084,33 @@ def formulario_registro(
     configuracao = _configurar_recurso(request, recurso)
     if configuracao.get("somente_leitura"):
         raise PermissionDenied
+    usuario = usuario_autenticado(request)
+    empresa_do_contexto = empresa_ativa(request)
+    modelo = configuracao["modelo"]
+    if (
+        modelo in MODELOS_POR_EMPRESA
+        and eh_administrador(usuario)
+        and pk is None
+        and empresa_do_contexto is None
+    ):
+        proximo = urlencode({"proximo": request.get_full_path()})
+        return redirect(f"{reverse('selecionar_empresa')}?{proximo}")
     queryset = _queryset_recurso(request, configuracao)
     instancia = get_object_or_404(queryset, pk=pk) if pk is not None else None
     formulario_class = configuracao["formulario"]
-    usuario = usuario_autenticado(request)
     empresa_fixa = None
-    empresa_do_contexto = empresa_ativa(request)
-    if (
-        configuracao["modelo"] in MODELOS_POR_EMPRESA
-        and empresa_do_contexto
-        and not eh_administrador(usuario)
-    ):
+    if modelo in MODELOS_POR_EMPRESA:
+        empresa_fixa = (
+            getattr(instancia, "empresa", None)
+            if instancia is not None
+            else empresa_do_contexto
+        )
+    if empresa_fixa is not None and modelo in FORMULARIOS_DO_GESTOR:
         formulario_class = FORMULARIOS_DO_GESTOR[configuracao["modelo"]]
-        empresa_fixa = empresa_do_contexto
     argumentos = {"empresa": empresa_fixa} if empresa_fixa else {}
     formulario = formulario_class(
         request.POST or None, instance=instancia, **argumentos
     )
-    if (
-        eh_administrador(usuario)
-        and empresa_do_contexto
-        and instancia is None
-        and "empresa" in formulario.fields
-    ):
-        formulario.fields["empresa"].initial = empresa_do_contexto.pk
     _limitar_upcs(formulario, request, configuracao["modelo"], empresa_fixa)
     proximo = _proximo_seguro(request)
     _adicionar_atalhos(request, formulario, recurso, usuario)
@@ -1019,6 +1126,9 @@ def formulario_registro(
         registro.save()
         formulario.save_m2m()
         messages.success(request, f"{configuracao['titulo']}: registro salvo.")
+        campo_origem = request.GET.get("campo", "")
+        if proximo and campo_origem:
+            proximo = _destino_com_selecao(proximo, campo_origem, registro.pk)
         return redirect(proximo or reverse("lista_registros", args=[recurso]))
 
     return render(

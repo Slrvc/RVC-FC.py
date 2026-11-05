@@ -710,6 +710,9 @@ tbody tr:last-child td {
   flex-direction: column;
   gap: 0.38rem;
 }
+.field-wide {
+  grid-column: 1 / -1;
+}
 .field-checkbox {
   flex-direction: row;
   align-items: center;

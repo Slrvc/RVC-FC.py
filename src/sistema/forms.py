@@ -38,7 +38,6 @@ from sistema.models import (
     Proprietario,
     StatusAutorizacao,
     Talhao,
-    TipoColheita,
     TipoTransporte,
     TipoUsuario,
     TransporteLenha,
@@ -47,6 +46,22 @@ from sistema.models import (
 
 if TYPE_CHECKING:
     from datetime import date
+
+
+class UPCsAutorizacaoField(forms.ModelMultipleChoiceField):
+    def clean(self, value):
+        if not isinstance(value, (list, tuple)):
+            value = [value] if value else []
+        return super().clean(value)
+
+
+class UPCsSelectWidget(forms.Select):
+    def value_from_datadict(self, data, files, name):
+        getlist = getattr(data, "getlist", None)
+        if getlist is not None:
+            values = getlist(name)
+            return values or None
+        return super().value_from_datadict(data, files, name)
 
 
 class ContextoEmpresaForm(forms.Form):
@@ -86,6 +101,15 @@ class FormularioEmSecoes(forms.ModelForm):
             ):
                 campo.queryset = campo.queryset.select_related("municipio__estado")
                 campo.label_from_instance = lambda e: e.identificacao
+            elif (
+                isinstance(campo, forms.ModelChoiceField)
+                and campo.queryset.model is Fazenda
+            ):
+                campo.label_from_instance = lambda fazenda: (
+                    f"{fazenda.nome} (Matrícula {fazenda.numero_matricula})"
+                    if fazenda.numero_matricula
+                    else fazenda.nome
+                )
 
     def clean(self):
         dados = super().clean()
@@ -394,8 +418,9 @@ class FazendaForm(FormularioComMunicipio):
         ),
         (
             "Regularização",
-            "Informe o CAR ou, na falta dele, o documento de propriedade ou posse.",
+            "Informe a matrícula, o CAR ou o documento de propriedade ou posse.",
             (
+                "numero_matricula",
                 "numero_car",
                 "tipo_documento_posse",
                 "numero_documento_posse",
@@ -418,6 +443,7 @@ class FazendaForm(FormularioComMunicipio):
             "endereco",
             "localidade",
             "referencia_local",
+            "numero_matricula",
             "numero_car",
             "tipo_documento_posse",
             "numero_documento_posse",
@@ -432,6 +458,7 @@ class FazendaForm(FormularioComMunicipio):
             "municipio": "Município (código IBGE)",
             "endereco": "Endereço",
             "referencia_local": "Como chegar",
+            "numero_matricula": "Número da matrícula",
             "tipo_documento_posse": "Tipo do documento de posse",
             "numero_documento_posse": "Número do documento de posse",
             "observacao": "Observação",
@@ -641,23 +668,21 @@ class FornecedorGestorForm(FornecedorForm):
 
 class PlantioForm(FormularioDaEmpresa, FormularioEmSecoes):
     campos_da_empresa = ("fazenda",)
-    campos_unicos = ("numero_cadastro",)
     secoes_campos = (
         (
-            "Cadastro do plantio",
-            "Número no MG Florestas ou o motivo da dispensa.",
+            "Identificação",
+            "Fazenda do plantio.",
             (
                 "empresa",
                 "fazenda",
-                "numero_cadastro",
-                "motivo_dispensa",
-                "area_ha",
             ),
         ),
         (
             "Características",
-            "Espécie, origem e espaçamento do plantio.",
+            "Área, idade, espécie, origem e espaçamento do plantio.",
             (
+                "area_ha",
+                "idade_anos",
                 "especie",
                 "origem",
                 "metodo_propagacao",
@@ -667,7 +692,7 @@ class PlantioForm(FormularioDaEmpresa, FormularioEmSecoes):
         ),
         (
             "Ciclo",
-            "A idade é calculada a partir do plantio ou do último corte.",
+            "Informe as datas do plantio e do último corte, quando conhecidas.",
             ("data_plantio", "data_ultimo_corte", "rotacao", "observacao"),
         ),
     )
@@ -677,9 +702,8 @@ class PlantioForm(FormularioDaEmpresa, FormularioEmSecoes):
         fields = [
             "empresa",
             "fazenda",
-            "numero_cadastro",
-            "motivo_dispensa",
             "area_ha",
+            "idade_anos",
             "especie",
             "origem",
             "metodo_propagacao",
@@ -692,8 +716,7 @@ class PlantioForm(FormularioDaEmpresa, FormularioEmSecoes):
         ]
         labels = {
             "empresa": "Empresa/unidade",
-            "numero_cadastro": "Cadastro MG Florestas",
-            "motivo_dispensa": "Motivo da dispensa",
+            "idade_anos": "Idade (anos)",
             "area_ha": "Área (ha)",
             "especie": "Espécie",
             "metodo_propagacao": "Método de propagação",
@@ -713,11 +736,6 @@ class PlantioForm(FormularioDaEmpresa, FormularioEmSecoes):
 
     def clean(self):
         dados = super().clean()
-        if not dados.get("numero_cadastro") and not dados.get("motivo_dispensa"):
-            self.add_error(
-                "numero_cadastro",
-                "Informe o número do cadastro ou o motivo da dispensa.",
-            )
         plantio, corte = dados.get("data_plantio"), dados.get("data_ultimo_corte")
         if plantio and corte and corte < plantio:
             self.add_error(
@@ -733,11 +751,35 @@ class PlantioGestorForm(PlantioForm):
 
 class TalhaoForm(FormularioDaEmpresa, FormularioEmSecoes):
     campos_da_empresa = ("fazenda", "plantio")
+    volume_m3 = forms.DecimalField(
+        label="Volume total (m³)",
+        max_digits=12,
+        decimal_places=3,
+        min_value=Decimal("0"),
+    )
+    saldo_a_retirar_m3 = forms.DecimalField(
+        label="Saldo a retirar (m³)",
+        max_digits=12,
+        decimal_places=3,
+        required=False,
+        disabled=True,
+        help_text=(
+            "Calculado pelo volume total menos o volume já registrado nos transportes."
+        ),
+    )
     secoes_campos = (
         (
             "Identificação do talhão",
             "Use o mesmo código da planilha de talhões do DCF.",
-            ("empresa", "fazenda", "plantio", "identificacao", "area_ha"),
+            (
+                "empresa",
+                "fazenda",
+                "plantio",
+                "identificacao",
+                "area_ha",
+                "volume_m3",
+                "saldo_a_retirar_m3",
+            ),
         ),
         (
             "Localização",
@@ -754,6 +796,7 @@ class TalhaoForm(FormularioDaEmpresa, FormularioEmSecoes):
             "plantio",
             "identificacao",
             "area_ha",
+            "volume_m3",
             "latitude",
             "longitude",
             "geometria",
@@ -767,6 +810,27 @@ class TalhaoForm(FormularioDaEmpresa, FormularioEmSecoes):
             "observacao": "Observação",
         }
         widgets = {"geometria": forms.Textarea(attrs={"rows": 4})}
+
+    def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        super().__init__(*args, **kwargs)
+        valor_fazenda = (
+            self.data.get("fazenda")
+            if self.is_bound
+            else self.initial.get("fazenda")
+        )
+        codigo_fazenda = getattr(valor_fazenda, "pk", valor_fazenda)
+        if codigo_fazenda and str(codigo_fazenda).isdecimal():
+            self.fields["plantio"].queryset = self.fields["plantio"].queryset.filter(
+                fazenda_id=codigo_fazenda
+            )
+        else:
+            self.fields["plantio"].queryset = Plantio.objects.none()
+        volume_retirado = self.instance.volume_retirado_m3
+        saldo = self.instance.saldo_a_retirar_m3
+        self.fields["volume_m3"].widget.attrs["data-volume-retirado"] = str(
+            volume_retirado
+        )
+        self.initial["saldo_a_retirar_m3"] = saldo
 
     def clean_geometria(self) -> str:
         texto = self.cleaned_data["geometria"].strip()
@@ -873,14 +937,13 @@ class UPCGestorForm(UPCForm):
 
 
 class InventarioFlorestalForm(FormularioDaEmpresa, FormularioEmSecoes):
-    campos_da_empresa = ("fornecedor", "fazenda", "plantio", "upc")
+    campos_da_empresa = ("fornecedor", "fazenda", "plantio")
     secoes_campos = (
         (
             "Identificação do inventário",
             "Um registro por lote. Cada autorização usa um inventário.",
             (
                 "empresa",
-                "upc",
                 "fazenda",
                 "plantio",
                 "lote",
@@ -896,20 +959,6 @@ class InventarioFlorestalForm(FormularioDaEmpresa, FormularioEmSecoes):
             ("fornecedor", "responsavel_tecnico", "registro_conselho", "numero_art"),
         ),
         (
-            "Amostragem",
-            "Método, intensidade e equações usadas.",
-            (
-                "metodo_amostragem",
-                "numero_parcelas",
-                "area_parcela_m2",
-                "equacao_volume",
-                "fator_forma",
-                "equacao_hipsometrica",
-                "latitude",
-                "longitude",
-            ),
-        ),
-        (
             "Resultado",
             "Volume por hectare, árvores por hectare e VMI são calculados.",
             (
@@ -917,18 +966,6 @@ class InventarioFlorestalForm(FormularioDaEmpresa, FormularioEmSecoes):
                 "numero_arvores",
                 "dap_medio_cm",
                 "altura_media_m",
-            ),
-        ),
-        (
-            "Estatística",
-            "Parâmetros exigidos no DCF, item 5.",
-            (
-                "nivel_probabilidade",
-                "t_student",
-                "erro_padrao_media",
-                "erro_amostragem_pct",
-                "ic_inferior_m3",
-                "ic_superior_m3",
                 "observacao",
             ),
         ),
@@ -938,7 +975,6 @@ class InventarioFlorestalForm(FormularioDaEmpresa, FormularioEmSecoes):
         model = InventarioFlorestal
         fields = [
             "empresa",
-            "upc",
             "fazenda",
             "plantio",
             "lote",
@@ -950,29 +986,14 @@ class InventarioFlorestalForm(FormularioDaEmpresa, FormularioEmSecoes):
             "responsavel_tecnico",
             "registro_conselho",
             "numero_art",
-            "metodo_amostragem",
-            "numero_parcelas",
-            "area_parcela_m2",
-            "equacao_volume",
-            "fator_forma",
-            "equacao_hipsometrica",
-            "latitude",
-            "longitude",
             "volume_total",
             "numero_arvores",
             "dap_medio_cm",
             "altura_media_m",
-            "nivel_probabilidade",
-            "t_student",
-            "erro_padrao_media",
-            "erro_amostragem_pct",
-            "ic_inferior_m3",
-            "ic_superior_m3",
             "observacao",
         ]
         labels = {
             "empresa": "Empresa/unidade",
-            "upc": "UPC",
             "data_inventario": "Data do inventário",
             "area_ha": "Área do lote (ha)",
             "numero_talhoes": "Número de talhões",
@@ -981,25 +1002,24 @@ class InventarioFlorestalForm(FormularioDaEmpresa, FormularioEmSecoes):
             "responsavel_tecnico": "Responsável técnico",
             "registro_conselho": "Registro no conselho",
             "numero_art": "Número da ART",
-            "metodo_amostragem": "Método de amostragem",
-            "numero_parcelas": "Número de parcelas",
-            "area_parcela_m2": "Área da parcela (m²)",
-            "equacao_volume": "Equação de volume",
-            "fator_forma": "Fator de forma",
-            "equacao_hipsometrica": "Equação hipsométrica",
             "volume_total": "Volume total (m³)",
             "numero_arvores": "Número de árvores",
             "dap_medio_cm": "DAP médio (cm)",
             "altura_media_m": "Altura média (m)",
-            "nivel_probabilidade": "Nível de probabilidade (%)",
-            "t_student": "t de Student",
-            "erro_padrao_media": "Erro-padrão da média",
-            "erro_amostragem_pct": "Erro de amostragem (%)",
-            "ic_inferior_m3": "IC inferior (m³)",
-            "ic_superior_m3": "IC superior (m³)",
             "observacao": "Observação",
         }
         widgets = {"data_inventario": forms.DateInput(attrs={"type": "date"})}
+
+    def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        super().__init__(*args, **kwargs)
+        self.fields["vmi"] = forms.DecimalField(
+            label="VMI",
+            max_digits=10,
+            decimal_places=4,
+            required=False,
+            disabled=True,
+        )
+        self.initial["vmi"] = self.instance.vmi
 
     def clean(self):
         dados = super().clean()
@@ -1030,16 +1050,25 @@ class InventarioFlorestalGestorForm(InventarioFlorestalForm):
 
 class InventarioTalhaoForm(FormularioDaEmpresa, FormularioEmSecoes):
     campos_da_empresa = ("inventario", "talhao")
+    saldo_a_retirar_m3 = forms.DecimalField(
+        label="Saldo a retirar (m³)",
+        max_digits=12,
+        decimal_places=3,
+        required=False,
+        disabled=True,
+        help_text="Saldo do talhão após descontar os transportes registrados.",
+    )
     secoes_campos = (
         (
             "Talhão no inventário",
-            "Volume e árvores do talhão neste inventário.",
+            "Volume, saldo disponível e árvores do talhão neste inventário.",
             (
                 "empresa",
                 "inventario",
                 "talhao",
                 "area_ha",
                 "volume_total",
+                "saldo_a_retirar_m3",
                 "numero_arvores",
                 "observacao",
             ),
@@ -1066,6 +1095,45 @@ class InventarioTalhaoForm(FormularioDaEmpresa, FormularioEmSecoes):
             "numero_arvores": "Número de árvores",
             "observacao": "Observação",
         }
+        help_texts = {
+            "numero_arvores": (
+                "Estimado pela densidade de árvores do inventário e a área do talhão."
+            ),
+        }
+
+    def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        super().__init__(*args, **kwargs)
+        valor_inventario = (
+            self.data.get("inventario")
+            if self.is_bound
+            else self.initial.get("inventario", self.instance.inventario_id)
+        )
+        codigo_inventario = getattr(valor_inventario, "pk", valor_inventario)
+        inventario = None
+        if codigo_inventario and str(codigo_inventario).isdecimal():
+            inventario = self.fields["inventario"].queryset.filter(
+                pk=codigo_inventario
+            ).first()
+        if inventario is None:
+            self.fields["talhao"].queryset = Talhao.objects.none()
+        else:
+            self.fields["talhao"].queryset = self.fields["talhao"].queryset.filter(
+                fazenda_id=inventario.fazenda_id
+            )
+        valor_talhao = (
+            self.data.get("talhao")
+            if self.is_bound
+            else self.initial.get("talhao", self.instance.talhao_id)
+        )
+        codigo_talhao = getattr(valor_talhao, "pk", valor_talhao)
+        talhao = None
+        if codigo_talhao and str(codigo_talhao).isdecimal():
+            talhao = self.fields["talhao"].queryset.filter(
+                pk=codigo_talhao
+            ).first()
+        self.initial["saldo_a_retirar_m3"] = (
+            talhao.saldo_a_retirar_m3 if talhao is not None else None
+        )
 
     def clean(self):
         dados = super().clean()
@@ -1091,7 +1159,13 @@ class InventarioTalhaoGestorForm(InventarioTalhaoForm):
 
 
 class AutorizacaoAmbientalForm(FormularioDaEmpresa, FormularioEmSecoes):
-    campos_da_empresa = ("fazenda", "upc", "plantio", "inventario")
+    upcs = UPCsAutorizacaoField(
+        queryset=UPC.objects.all(),
+        required=False,
+        label="UPC(s)",
+        help_text="Produção permite uma UPC; nota fiscal pode vincular várias.",
+    )
+    campos_da_empresa = ("fazenda", "plantio", "inventario")
     campos_unicos = ("numero",)
     secoes_campos = (
         (
@@ -1111,8 +1185,8 @@ class AutorizacaoAmbientalForm(FormularioDaEmpresa, FormularioEmSecoes):
         ),
         (
             "Vínculos",
-            "Em nota fiscal, fazenda, UPC, plantio e inventário ficam vazios.",
-            ("fazenda", "plantio", "inventario", "upc"),
+            "A autorização pode vincular uma ou mais UPCs.",
+            ("fazenda", "plantio", "inventario", "upcs"),
         ),
         (
             "Volume autorizado",
@@ -1124,18 +1198,6 @@ class AutorizacaoAmbientalForm(FormularioDaEmpresa, FormularioEmSecoes):
                 "volume_declarado",
                 "volume_base_m3",
                 "fator_conversao",
-            ),
-        ),
-        (
-            "Colheita",
-            "DCF itens 4.2 e 4.10 a 4.13.",
-            (
-                "area_colher_ha",
-                "tipo_colheita",
-                "percentual_desbaste",
-                "possui_subbosque",
-                "volume_subbosque_m3_ha",
-                "area_basal_acima_10",
             ),
         ),
         (
@@ -1167,19 +1229,13 @@ class AutorizacaoAmbientalForm(FormularioDaEmpresa, FormularioEmSecoes):
             "fazenda",
             "plantio",
             "inventario",
-            "upc",
+            "upcs",
             "produto",
             "base_volume",
             "unidade_volume",
             "volume_declarado",
             "volume_base_m3",
             "fator_conversao",
-            "area_colher_ha",
-            "tipo_colheita",
-            "percentual_desbaste",
-            "possui_subbosque",
-            "volume_subbosque_m3_ha",
-            "area_basal_acima_10",
             "numero_dae_expediente",
             "valor_taxa_expediente",
             "numero_dae_florestal",
@@ -1196,18 +1252,12 @@ class AutorizacaoAmbientalForm(FormularioDaEmpresa, FormularioEmSecoes):
             "data_vencimento": "Data de vencimento",
             "numero_recibo_sinaflor": "Recibo SINAFLOR",
             "inventario": "Inventário",
-            "upc": "UPC",
+            "upcs": "UPC(s)",
             "base_volume": "Base do volume",
             "unidade_volume": "Unidade do volume",
             "volume_declarado": "Volume declarado",
             "volume_base_m3": "Volume base (m³)",
             "fator_conversao": "Fator de conversão",
-            "area_colher_ha": "Área a colher (ha)",
-            "tipo_colheita": "Tipo de colheita",
-            "percentual_desbaste": "Percentual de desbaste (%)",
-            "possui_subbosque": "Possui sub-bosque nativo",
-            "volume_subbosque_m3_ha": "Volume do sub-bosque (m³/ha)",
-            "area_basal_acima_10": "Área basal acima de 10 m²/ha",
             "numero_dae_expediente": "DAE da taxa de expediente",
             "valor_taxa_expediente": "Valor da taxa de expediente",
             "numero_dae_florestal": "DAE da taxa florestal",
@@ -1220,10 +1270,23 @@ class AutorizacaoAmbientalForm(FormularioDaEmpresa, FormularioEmSecoes):
             "data_vencimento": forms.DateInput(attrs={"type": "date"}),
         }
 
+    def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        super().__init__(*args, **kwargs)
+        empresa = self.empresa_fixa or getattr(self.instance, "empresa", None)
+        if empresa is not None:
+            self.fields["upcs"].queryset = UPC.objects.filter(empresa=empresa)
+        modalidade = (
+            self.data.get("modalidade")
+            if self.is_bound
+            else self.initial.get("modalidade", self.instance.modalidade)
+        )
+        if modalidade != Modalidade.NOTA_FISCAL:
+            self.fields["upcs"].widget = UPCsSelectWidget()
+
     def clean(self):
         dados = super().clean()
         if dados.get("modalidade") == Modalidade.NOTA_FISCAL:
-            for nome in ("fazenda", "upc", "plantio", "inventario"):
+            for nome in ("fazenda", "plantio", "inventario"):
                 dados[nome] = None
             dados["base_volume"] = ""
         else:
@@ -1237,15 +1300,6 @@ class AutorizacaoAmbientalForm(FormularioDaEmpresa, FormularioEmSecoes):
             "numero_recibo_sinaflor"
         ):
             self.add_error("numero_recibo_sinaflor", "Informe o recibo SINAFLOR.")
-        if dados.get("tipo_colheita") == TipoColheita.DESBASTE and not dados.get(
-            "percentual_desbaste"
-        ):
-            self.add_error("percentual_desbaste", "Informe o percentual do desbaste.")
-        if (
-            dados.get("possui_subbosque")
-            and dados.get("volume_subbosque_m3_ha") is None
-        ):
-            self.add_error("volume_subbosque_m3_ha", "Informe o volume do sub-bosque.")
         return dados
 
     def _validar_producao(self, dados: dict) -> None:
@@ -1254,18 +1308,31 @@ class AutorizacaoAmbientalForm(FormularioDaEmpresa, FormularioEmSecoes):
             self.add_error("fazenda", "Obrigatório em produção.")
         if not dados.get("base_volume"):
             self.add_error("base_volume", "Obrigatório em produção.")
+        upcs = dados.get("upcs")
+        if (
+            dados.get("modalidade") == Modalidade.PRODUCAO
+            and upcs is not None
+            and len(upcs) > 1
+        ):
+            self.add_error(
+                "upcs",
+                "Uma autorização de produção permite apenas uma UPC.",
+            )
         if dados.get("produto") in {
             ProdutoAutorizado.CARVAO_EXOTICA,
             ProdutoAutorizado.CARVAO_NATIVO,
-        } and not dados.get("upc"):
-            self.add_error("upc", "Obrigatória quando o produto é carvão.")
+        } and not upcs:
+            self.add_error("upcs", "Obrigatória quando o produto é carvão.")
         if dados.get("base_volume") == BaseVolume.INVENTARIO and not inventario:
             self.add_error("inventario", "Informe o inventário que embasa o volume.")
         if fazenda:
-            for nome in ("inventario", "plantio", "upc"):
+            for nome in ("inventario", "plantio"):
                 registro = dados.get(nome)
                 if registro and registro.fazenda_id != fazenda.pk:
                     self.add_error(nome, "Pertence a outra fazenda.")
+        empresa = self.empresa_fixa or dados.get("empresa")
+        if empresa and upcs and any(upc.empresa_id != empresa.pk for upc in upcs):
+            self.add_error("upcs", "Selecione apenas UPCs da mesma empresa.")
 
 
 class AutorizacaoAmbientalGestorForm(AutorizacaoAmbientalForm):
@@ -1882,7 +1949,7 @@ class ProducaoCarvaoForm(FormularioDaEmpresa, FormularioEmSecoes):
     def clean(self):
         dados = super().clean()
         autorizacao, upc = dados.get("autorizacao"), dados.get("upc")
-        if autorizacao and upc and autorizacao.upc_id != upc.pk:
+        if autorizacao and upc and not autorizacao.upcs.filter(pk=upc.pk).exists():
             self.add_error("autorizacao", "A autorização é de outra UPC.")
         for campo in ("volume_mdc", "volume_lenha_m3"):
             valor = dados.get(campo)
