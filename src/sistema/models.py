@@ -5,6 +5,7 @@ from decimal import Decimal
 from django.conf import settings
 from django.contrib.auth.models import AbstractUser, UserManager
 from django.db import models, transaction
+from django.db.models.functions import Coalesce
 
 FATOR_MST_POR_M3 = Decimal("1.5")
 
@@ -39,7 +40,7 @@ class Municipio(models.Model):
 
 
 class TipoUsuario(models.TextChoices):
-    ADMINISTRADOR = "admin", "Administrador do sistema"
+    ADMINISTRADOR = "admin", "Administrador da matriz"
     GESTOR = "gestor", "Gestor da unidade"
     OPERADOR = "operador", "Operador (lançamentos de produção)"
 
@@ -65,12 +66,16 @@ class UsuarioManager(UserManager):
 class Usuario(AbstractUser):
     REQUIRED_FIELDS = ["nome_completo", "email"]
 
-    empresa = models.ForeignKey(
+    matriz = models.ForeignKey(
         "Empresa",
         on_delete=models.PROTECT,
         null=True,
         blank=True,
-        related_name="usuarios",
+        related_name="usuarios_da_matriz",
+        limit_choices_to={"tipo": "MATRIZ"},
+    )
+    empresas = models.ManyToManyField(
+        "Empresa", blank=True, related_name="usuarios_com_acesso"
     )
     nome_completo = models.CharField(max_length=150)
     upcs = models.ManyToManyField("UPC", blank=True, related_name="gestores")
@@ -102,12 +107,31 @@ class Usuario(AbstractUser):
     def __str__(self) -> str:
         return self.nome_completo or self.username
 
-    def upcs_permitidas(self):
-        # Sem UPCs vinculadas, o gestor atende todas as UPCs da empresa.
-        if self.empresa_id is None:
-            return UPC.objects.none()
-        permitidas = UPC.objects.filter(empresa_id=self.empresa_id)
-        if self.pk and self.upcs.exists():
+    @property
+    def eh_administrador(self) -> bool:
+        return self.is_superuser or self.tipo_usuario == TipoUsuario.ADMINISTRADOR
+
+    def empresas_permitidas(self) -> models.QuerySet[Empresa]:
+        """Superusuário: todas. Administrador: a matriz e as filiais dela.
+        Gestor e operador: as empresas liberadas pelo administrador."""
+        if self.is_superuser:
+            return Empresa.objects.all()
+        if self.matriz_id is None:
+            return Empresa.objects.none()
+        da_conta = Empresa.objects.da_conta(self.matriz_id)
+        if self.tipo_usuario == TipoUsuario.ADMINISTRADOR:
+            return da_conta
+        if not self.pk:
+            return Empresa.objects.none()
+        return da_conta.filter(usuarios_com_acesso=self)
+
+    def upcs_permitidas(self, empresa: Empresa | None = None) -> models.QuerySet[UPC]:
+        """UPCs das empresas permitidas (ou só da empresa informada).
+        Sem UPCs vinculadas, o gestor atende todas as UPCs dessas empresas."""
+        permitidas = UPC.objects.filter(empresa__in=self.empresas_permitidas())
+        if empresa is not None:
+            permitidas = permitidas.filter(empresa=empresa)
+        if not self.eh_administrador and self.pk and self.upcs.exists():
             return permitidas.filter(gestores=self)
         return permitidas
 
@@ -141,10 +165,27 @@ class TipoEmpresa(models.TextChoices):
     FILIAL = "FILIAL", "Filial"
 
 
+class EmpresaQuerySet(models.QuerySet):
+    def da_conta(self, matriz_id: int) -> EmpresaQuerySet:
+        """A matriz e as filiais dela: tudo o que um cliente do sistema enxerga."""
+        return self.filter(models.Q(pk=matriz_id) | models.Q(matriz_id=matriz_id))
+
+    def ativas(self) -> EmpresaQuerySet:
+        return self.filter(data_encerramento__isnull=True)
+
+
 class Empresa(RegistroAuditavel):
     codigo = models.BigAutoField(primary_key=True)
     tipo = models.CharField(
         max_length=6, choices=TipoEmpresa.choices, default=TipoEmpresa.MATRIZ
+    )
+    matriz = models.ForeignKey(
+        "self",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="filiais",
+        limit_choices_to={"tipo": TipoEmpresa.MATRIZ},
     )
     descricao_filial = models.CharField(
         "Descrição da filial",
@@ -169,13 +210,39 @@ class Empresa(RegistroAuditavel):
     celular = models.CharField(max_length=20, blank=True)
     email = models.EmailField(max_length=254, blank=True)
     site = models.URLField(max_length=200, blank=True)
+    data_encerramento = models.DateField(
+        "Data de encerramento",
+        null=True,
+        blank=True,
+        help_text="Empresa encerrada fica disponível só para consulta.",
+    )
+    motivo_encerramento = models.CharField(
+        "Motivo do encerramento", max_length=255, blank=True
+    )
+
+    objects = EmpresaQuerySet.as_manager()
 
     class Meta:
-        ordering = ["razao_social"]
+        ordering = ["razao_social", "cnpj"]
         verbose_name_plural = "empresas"
 
     def __str__(self) -> str:
         return self.nome_fantasia or self.razao_social
+
+    @property
+    def encerrada(self) -> bool:
+        return self.data_encerramento is not None
+
+    @property
+    def situacao_exibicao(self) -> str:
+        if self.encerrada:
+            return f"Encerrada em {self.data_encerramento:%d/%m/%Y}"
+        return "Ativa"
+
+    @property
+    def matriz_da_conta_id(self) -> int:
+        """A matriz que é dona desta empresa (a própria, se for matriz)."""
+        return self.matriz_id or self.pk
 
     @property
     def tipo_exibicao(self) -> str:
@@ -186,7 +253,8 @@ class Empresa(RegistroAuditavel):
     @property
     def identificacao(self) -> str:
         local = f"{self.municipio.nome}/{self.municipio.estado.uf}"
-        return f"{self} · {self.tipo_exibicao} · {local} · CNPJ {self.cnpj}"
+        texto = f"{self} · {self.tipo_exibicao} · {local} · CNPJ {self.cnpj}"
+        return f"{texto} · encerrada" if self.encerrada else texto
 
 
 class Idioma(models.IntegerChoices):
@@ -225,6 +293,64 @@ class Parametros(RegistroAuditavel):
 
     def __str__(self) -> str:
         return f"{self.empresa} ({self.terminal})"
+
+
+class ControleEstoqueTalhao(models.TextChoices):
+    EM_PE = "EM_PE", "Madeira em pé (inventário até a colheita)"
+    COLHIDA = "COLHIDA", "Lenha colhida (colheita até o baldeio)"
+
+
+TOLERANCIA_FATOR_PADRAO_PCT = Decimal("30")
+
+
+class ParametroEmpresa(RegistroAuditavel):
+    """Fatores de conversão e regras de estoque, uma linha por empresa."""
+
+    codigo = models.BigAutoField(primary_key=True)
+    empresa = models.OneToOneField(
+        Empresa, on_delete=models.CASCADE, related_name="parametro_empresa"
+    )
+    controle_estoque_talhao = models.CharField(
+        max_length=10,
+        choices=ControleEstoqueTalhao.choices,
+        default=ControleEstoqueTalhao.COLHIDA,
+    )
+    fator_mst_por_m3 = models.DecimalField(
+        max_digits=6, decimal_places=3, default=FATOR_MST_POR_M3
+    )
+    fator_m3_por_mdc_ideal = models.DecimalField(
+        max_digits=6, decimal_places=3, default=Decimal("1.33")
+    )
+    fator_mst_por_mdc_ideal = models.DecimalField(
+        max_digits=6, decimal_places=3, default=Decimal("2.0")
+    )
+    tolerancia_fator_pct = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True
+    )
+    observacao = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        ordering = ["empresa"]
+        verbose_name = "parâmetro de produção"
+        verbose_name_plural = "parâmetros de produção"
+
+    def __str__(self) -> str:
+        return f"Parâmetros de produção - {self.empresa}"
+
+    @classmethod
+    def da_empresa(cls, empresa_id: int | None) -> ParametroEmpresa:
+        """Parâmetros gravados da empresa ou, se não houver, os valores padrão."""
+        if empresa_id is not None:
+            parametro = cls.objects.filter(empresa_id=empresa_id).first()
+            if parametro is not None:
+                return parametro
+        return cls(empresa_id=empresa_id)
+
+    @property
+    def tolerancia_efetiva_pct(self) -> Decimal:
+        if self.tolerancia_fator_pct is None:
+            return TOLERANCIA_FATOR_PADRAO_PCT
+        return self.tolerancia_fator_pct
 
 
 class Proprietario(RegistroAuditavel):
@@ -469,18 +595,6 @@ class UPC(RegistroAuditavel):
     utm_leste = models.DecimalField(max_digits=12, decimal_places=2)
     utm_norte = models.DecimalField(max_digits=12, decimal_places=2)
     utm_fuso = models.CharField(max_length=4, blank=True)
-    numero_fornos = models.PositiveIntegerField()
-    tipo_forno = models.CharField(max_length=60, blank=True)
-    diametro_forno_m = models.DecimalField(
-        max_digits=6, decimal_places=2, null=True, blank=True
-    )
-    altura_total_forno_m = models.DecimalField(
-        max_digits=6, decimal_places=2, null=True, blank=True
-    )
-    altura_cilindro_m = models.DecimalField(
-        max_digits=6, decimal_places=2, null=True, blank=True
-    )
-    volume_forno_mdc = models.DecimalField(max_digits=10, decimal_places=2)
     ciclo_producao_dias = models.PositiveIntegerField()
     observacao = models.CharField(max_length=255, blank=True)
 
@@ -497,9 +611,25 @@ class UPC(RegistroAuditavel):
     def __str__(self) -> str:
         return self.nome
 
+    def _fornos_em_uso(self) -> models.QuerySet[Forno]:
+        if not self.pk:
+            return Forno.objects.none()
+        return self.fornos.exclude(situacao=SituacaoForno.DESATIVADO)
+
+    @property
+    def numero_fornos(self) -> int:
+        """DCF 7.2: fornos que não estão desativados."""
+        return self._fornos_em_uso().count()
+
     @property
     def volume_ciclo_mdc(self) -> Decimal:
-        return self.numero_fornos * self.volume_forno_mdc
+        """DCF 7.7: soma da capacidade dos fornos em uso."""
+        total = self._fornos_em_uso().aggregate(
+            total=models.Sum(
+                Coalesce("capacidade_mdc", "tipo_forno__capacidade_mdc")
+            )
+        )["total"]
+        return total or Decimal(0)
 
     @property
     def volume_mes_mdc(self) -> Decimal:
@@ -508,6 +638,162 @@ class UPC(RegistroAuditavel):
         return (self.volume_ciclo_mdc * 30 / self.ciclo_producao_dias).quantize(
             Decimal("0.01")
         )
+
+
+class FormatoForno(models.TextChoices):
+    CIRCULAR = "CIRCULAR", "Circular"
+    RETANGULAR = "RETANGULAR", "Retangular"
+
+
+class NivelMecanizacao(models.TextChoices):
+    MANUAL = "MANUAL", "Manual"
+    SEMIMECANIZADO = "SEMIMECANIZADO", "Semimecanizado"
+    MECANIZADO = "MECANIZADO", "Mecanizado"
+
+
+class TipoForno(RegistroAuditavel):
+    """Modelo de forno (DCF 7.3 a 7.5)."""
+
+    codigo = models.BigAutoField(primary_key=True)
+    empresa = models.ForeignKey(
+        Empresa, on_delete=models.PROTECT, related_name="tipos_forno"
+    )
+    nome = models.CharField(max_length=60)
+    formato = models.CharField(
+        max_length=12, choices=FormatoForno.choices, default=FormatoForno.CIRCULAR
+    )
+    nivel_mecanizacao = models.CharField(
+        max_length=15,
+        choices=NivelMecanizacao.choices,
+        default=NivelMecanizacao.MANUAL,
+    )
+    enchimento_mecanizado = models.BooleanField(default=False)
+    descarga_mecanizada = models.BooleanField(default=False)
+    diametro_m = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True
+    )
+    comprimento_m = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True
+    )
+    largura_m = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True
+    )
+    altura_total_m = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True
+    )
+    altura_cilindro_m = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True
+    )
+    capacidade_mdc = models.DecimalField(max_digits=10, decimal_places=2)
+    capacidade_lenha_mst = models.DecimalField(
+        max_digits=10, decimal_places=3, null=True, blank=True
+    )
+    observacao = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        ordering = ["nome"]
+        verbose_name = "tipo de forno"
+        verbose_name_plural = "tipos de forno"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["empresa", "nome"], name="tipo_forno_nome_por_empresa"
+            )
+        ]
+
+    def __str__(self) -> str:
+        return self.nome
+
+
+class SituacaoForno(models.TextChoices):
+    ATIVO = "ATIVO", "Ativo"
+    EM_MANUTENCAO = "EM_MANUTENCAO", "Em manutenção"
+    DESATIVADO = "DESATIVADO", "Desativado"
+
+
+class Forno(RegistroAuditavel):
+    codigo = models.BigAutoField(primary_key=True)
+    empresa = models.ForeignKey(
+        Empresa, on_delete=models.PROTECT, related_name="fornos"
+    )
+    upc = models.ForeignKey(UPC, on_delete=models.PROTECT, related_name="fornos")
+    tipo_forno = models.ForeignKey(
+        TipoForno, on_delete=models.PROTECT, related_name="fornos"
+    )
+    numero = models.CharField(max_length=20)
+    data_instalacao = models.DateField(null=True, blank=True)
+    capacidade_mdc = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True
+    )
+    situacao = models.CharField(
+        max_length=15, choices=SituacaoForno.choices, default=SituacaoForno.ATIVO
+    )
+    observacao = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        ordering = ["upc__nome", "numero"]
+        verbose_name_plural = "fornos"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["upc", "numero"], name="forno_numero_por_upc"
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.upc} - {self.numero}"
+
+    @property
+    def capacidade_efetiva_mdc(self) -> Decimal:
+        if self.capacidade_mdc is not None:
+            return self.capacidade_mdc
+        return self.tipo_forno.capacidade_mdc
+
+
+class SituacaoBox(models.TextChoices):
+    ATIVO = "ATIVO", "Ativo"
+    INATIVO = "INATIVO", "Inativo"
+
+
+class BoxLenha(RegistroAuditavel):
+    """Box da praça de carbonização onde a lenha do baldeio é depositada."""
+
+    codigo = models.BigAutoField(primary_key=True)
+    empresa = models.ForeignKey(
+        Empresa, on_delete=models.PROTECT, related_name="boxes_lenha"
+    )
+    upc = models.ForeignKey(UPC, on_delete=models.PROTECT, related_name="boxes_lenha")
+    numero = models.CharField(max_length=20)
+    descricao = models.CharField(max_length=100, blank=True)
+    capacidade_mst = models.DecimalField(
+        max_digits=10, decimal_places=3, null=True, blank=True
+    )
+    situacao = models.CharField(
+        max_length=10, choices=SituacaoBox.choices, default=SituacaoBox.ATIVO
+    )
+    observacao = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        ordering = ["upc__nome", "numero"]
+        verbose_name = "box de lenha"
+        verbose_name_plural = "boxes de lenha"
+        constraints = [
+            models.UniqueConstraint(fields=["upc", "numero"], name="box_numero_por_upc")
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.upc} - Box {self.numero}"
+
+    @property
+    def estoque_mst(self) -> Decimal:
+        """Aproximação: lenha entregue no box menos a enchida a partir dele."""
+        if not self.pk:
+            return Decimal(0)
+        entregue = self.transportes_lenha.aggregate(total=models.Sum("volume_mst"))[
+            "total"
+        ] or Decimal(0)
+        enchida = self.ciclos_forno.exclude(
+            status=StatusCiclo.CANCELADO
+        ).aggregate(total=models.Sum("volume_lenha_enchimento"))["total"] or Decimal(0)
+        return entregue - enchida
 
 
 def _dividir(numerador: Decimal | None, denominador: Decimal | None) -> Decimal | None:
@@ -886,6 +1172,13 @@ class TransporteLenha(RegistroAuditavel):
         null=True,
         blank=True,
     )
+    box_lenha = models.ForeignKey(
+        BoxLenha,
+        on_delete=models.PROTECT,
+        related_name="transportes_lenha",
+        null=True,
+        blank=True,
+    )
     comprador = models.CharField(max_length=120, blank=True)
     tipo_transporte = models.CharField(
         max_length=15, choices=TipoTransporte.choices, default=TipoTransporte.PROPRIO
@@ -928,6 +1221,10 @@ class TransporteLenha(RegistroAuditavel):
         return f"{self.data_transporte:%d/%m/%Y} - {self.talhao}"
 
     def save(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        if self._state.adding:
+            self.fator_conversao = ParametroEmpresa.da_empresa(
+                self.empresa_id
+            ).fator_mst_por_m3
         fator = self.fator_conversao
         self.volume_m3 = (self.volume_mst / fator).quantize(Decimal("0.001"))
         if self.valor_mst is not None:
@@ -936,6 +1233,202 @@ class TransporteLenha(RegistroAuditavel):
             self.valor_mst = (self.valor_m3 / fator).quantize(Decimal("0.0001"))
         if self.valor_mst is not None:
             self.valor_total = (self.volume_mst * self.valor_mst).quantize(
+                Decimal("0.01")
+            )
+        super().save(*args, **kwargs)
+
+
+class StatusCiclo(models.TextChoices):
+    ENCHIMENTO = "ENCHIMENTO", "Enchimento"
+    CARBONIZACAO = "CARBONIZACAO", "Carbonização"
+    RESFRIAMENTO = "RESFRIAMENTO", "Resfriamento"
+    DESCARREGADO = "DESCARREGADO", "Descarregado"
+    CANCELADO = "CANCELADO", "Cancelado"
+
+
+STATUS_CICLO_ATIVO = (
+    StatusCiclo.ENCHIMENTO,
+    StatusCiclo.CARBONIZACAO,
+    StatusCiclo.RESFRIAMENTO,
+)
+
+
+class CondicaoTempo(models.TextChoices):
+    SECO = "SECO", "Seco"
+    CHUVOSO = "CHUVOSO", "Chuvoso"
+    MISTO = "MISTO", "Misto"
+
+
+class TipoExecucao(models.TextChoices):
+    PROPRIA = "PROPRIA", "Própria"
+    TERCEIRIZADA = "TERCEIRIZADA", "Terceirizada (empreiteiro)"
+
+
+def _dias_entre(inicio, fim) -> Decimal | None:
+    if inicio is None or fim is None:
+        return None
+    return (Decimal((fim - inicio).total_seconds()) / 86400).quantize(Decimal("0.01"))
+
+
+class CicloForno(RegistroAuditavel):
+    """Um ciclo de um forno: enchimento, carbonização, resfriamento e descarga."""
+
+    codigo = models.BigAutoField(primary_key=True)
+    empresa = models.ForeignKey(
+        Empresa, on_delete=models.PROTECT, related_name="ciclos_forno"
+    )
+    forno = models.ForeignKey(Forno, on_delete=models.PROTECT, related_name="ciclos")
+    numero_ciclo = models.PositiveIntegerField(blank=True)
+    status = models.CharField(
+        max_length=15, choices=StatusCiclo.choices, default=StatusCiclo.ENCHIMENTO
+    )
+    data_inicio_enchimento = models.DateTimeField()
+    data_acendimento = models.DateTimeField(null=True, blank=True)
+    data_fim_carbonizacao = models.DateTimeField(null=True, blank=True)
+    data_descarga = models.DateTimeField(null=True, blank=True)
+    dias_carbonizacao = models.DecimalField(
+        max_digits=6, decimal_places=2, null=True, editable=False
+    )
+    dias_resfriamento = models.DecimalField(
+        max_digits=6, decimal_places=2, null=True, editable=False
+    )
+    dias_ciclo = models.DecimalField(
+        max_digits=6, decimal_places=2, null=True, editable=False
+    )
+    box_lenha = models.ForeignKey(
+        BoxLenha,
+        on_delete=models.PROTECT,
+        related_name="ciclos_forno",
+        null=True,
+        blank=True,
+    )
+    volume_lenha_enchimento = models.DecimalField(
+        "Lenha no enchimento (MST)", max_digits=12, decimal_places=3
+    )
+    fator_conversao = models.DecimalField(
+        max_digits=6, decimal_places=3, null=True, blank=True
+    )
+    volume_lenha_m3 = models.DecimalField(
+        "Lenha no enchimento (m³)", max_digits=12, decimal_places=3, editable=False
+    )
+    volume_mdc = models.DecimalField(
+        "Carvão produzido (MDC)", max_digits=12, decimal_places=2, null=True, blank=True
+    )
+    fator_m3_por_mdc = models.DecimalField(
+        max_digits=8, decimal_places=4, null=True, editable=False
+    )
+    fator_mst_por_mdc = models.DecimalField(
+        max_digits=8, decimal_places=4, null=True, editable=False
+    )
+    condicao_tempo = models.CharField(
+        max_length=20, choices=CondicaoTempo.choices, blank=True
+    )
+    dias_secagem_lenha = models.PositiveIntegerField(null=True, blank=True)
+    responsavel_enchimento = models.CharField(max_length=80, blank=True)
+    responsavel_descarga = models.CharField(max_length=80, blank=True)
+    tipo_execucao = models.CharField(
+        max_length=15, choices=TipoExecucao.choices, default=TipoExecucao.PROPRIA
+    )
+    fornecedor = models.ForeignKey(
+        Fornecedor,
+        on_delete=models.PROTECT,
+        related_name="ciclos_forno",
+        null=True,
+        blank=True,
+    )
+    valor_mdc = models.DecimalField(
+        max_digits=12, decimal_places=4, null=True, blank=True
+    )
+    valor_producao = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, editable=False
+    )
+    observacao = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        ordering = ["-data_inicio_enchimento", "-codigo"]
+        verbose_name = "ciclo de forno"
+        verbose_name_plural = "ciclos de forno"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["forno", "numero_ciclo"], name="ciclo_numero_por_forno"
+            ),
+            models.UniqueConstraint(
+                fields=["forno"],
+                condition=models.Q(status__in=STATUS_CICLO_ATIVO),
+                name="um_ciclo_ativo_por_forno",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.forno} - ciclo {self.numero_ciclo}"
+
+    def status_pelas_datas(self) -> str:
+        if self.status == StatusCiclo.CANCELADO:
+            return StatusCiclo.CANCELADO
+        if self.data_descarga:
+            return StatusCiclo.DESCARREGADO
+        if self.data_fim_carbonizacao:
+            return StatusCiclo.RESFRIAMENTO
+        if self.data_acendimento:
+            return StatusCiclo.CARBONIZACAO
+        return StatusCiclo.ENCHIMENTO
+
+    def proximo_numero_ciclo(self) -> int:
+        ultimo = CicloForno.objects.filter(forno_id=self.forno_id).aggregate(
+            maior=models.Max("numero_ciclo")
+        )["maior"]
+        return (ultimo or 0) + 1
+
+    @property
+    def alerta_fator(self) -> str:
+        """Compara o MST por MDC do ciclo com o ideal da empresa."""
+        if self.fator_mst_por_mdc is None:
+            return ""
+        parametro = ParametroEmpresa.da_empresa(self.empresa_id)
+        ideal = parametro.fator_mst_por_mdc_ideal
+        if not ideal:
+            return ""
+        desvio_pct = (self.fator_mst_por_mdc - ideal) / ideal * 100
+        if desvio_pct > parametro.tolerancia_efetiva_pct:
+            return "Consumo de lenha acima do ideal"
+        if desvio_pct < -parametro.tolerancia_efetiva_pct:
+            return "Consumo de lenha abaixo do ideal"
+        return ""
+
+    def save(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        if not self.numero_ciclo:
+            self.numero_ciclo = self.proximo_numero_ciclo()
+        if self.fator_conversao is None:
+            self.fator_conversao = ParametroEmpresa.da_empresa(
+                self.empresa_id
+            ).fator_mst_por_m3
+        self.status = self.status_pelas_datas()
+        self.dias_carbonizacao = _dias_entre(
+            self.data_acendimento, self.data_fim_carbonizacao
+        )
+        self.dias_resfriamento = _dias_entre(
+            self.data_fim_carbonizacao, self.data_descarga
+        )
+        self.dias_ciclo = _dias_entre(self.data_inicio_enchimento, self.data_descarga)
+        self.volume_lenha_m3 = (
+            self.volume_lenha_enchimento / self.fator_conversao
+        ).quantize(Decimal("0.001"))
+        if self.volume_mdc:
+            self.fator_m3_por_mdc = (
+                self.volume_lenha_enchimento / self.fator_conversao / self.volume_mdc
+            ).quantize(Decimal("0.0001"))
+            self.fator_mst_por_mdc = (
+                self.volume_lenha_enchimento / self.volume_mdc
+            ).quantize(Decimal("0.0001"))
+        else:
+            self.fator_m3_por_mdc = self.fator_mst_por_mdc = None
+        self.valor_producao = None
+        if (
+            self.tipo_execucao == TipoExecucao.TERCEIRIZADA
+            and self.volume_mdc is not None
+            and self.valor_mdc is not None
+        ):
+            self.valor_producao = (self.volume_mdc * self.valor_mdc).quantize(
                 Decimal("0.01")
             )
         super().save(*args, **kwargs)
@@ -1237,72 +1730,9 @@ class Cliente(RegistroAuditavel):
         return self.nome_razao_social
 
 
-RENDIMENTO_REFERENCIA_MDC_M3 = Decimal("0.77")
-
-
-class ProducaoCarvao(RegistroAuditavel):
-    codigo = models.BigAutoField(primary_key=True)
-    empresa = models.ForeignKey(
-        Empresa, on_delete=models.PROTECT, related_name="producoes_carvao"
-    )
-    upc = models.ForeignKey(
-        UPC, on_delete=models.PROTECT, related_name="producoes_carvao"
-    )
-    autorizacao = models.ForeignKey(
-        AutorizacaoAmbiental,
-        on_delete=models.PROTECT,
-        related_name="producoes_carvao",
-        null=True,
-        blank=True,
-    )
-    data_producao = models.DateField()
-    numero_fornos = models.PositiveIntegerField(null=True, blank=True)
-    volume_mdc = models.DecimalField(
-        "Carvão produzido (MDC)", max_digits=12, decimal_places=2
-    )
-    volume_lenha_m3 = models.DecimalField(
-        "Lenha consumida (m³)",
-        max_digits=12,
-        decimal_places=3,
-        null=True,
-        blank=True,
-    )
-    rendimento_mdc_m3 = models.DecimalField(
-        max_digits=8, decimal_places=4, null=True, blank=True, editable=False
-    )
-    observacao = models.CharField(max_length=255, blank=True)
-
-    class Meta:
-        ordering = ["-data_producao", "-codigo"]
-        verbose_name = "produção de carvão"
-        verbose_name_plural = "produções de carvão"
-
-    def __str__(self) -> str:
-        return f"{self.upc} - {self.data_producao:%d/%m/%Y} - {self.volume_mdc} MDC"
-
-    @property
-    def alerta_rendimento(self) -> str:
-        if self.rendimento_mdc_m3 is None:
-            return ""
-        referencia = RENDIMENTO_REFERENCIA_MDC_M3
-        if self.rendimento_mdc_m3 < referencia * Decimal("0.7"):
-            return "Abaixo do esperado"
-        if self.rendimento_mdc_m3 > referencia * Decimal("1.3"):
-            return "Acima do esperado"
-        return ""
-
-    def save(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
-        rendimento = _dividir(self.volume_mdc, self.volume_lenha_m3)
-        self.rendimento_mdc_m3 = (
-            rendimento.quantize(Decimal("0.0001")) if rendimento is not None else None
-        )
-        super().save(*args, **kwargs)
-
-
 class TipoMovimentoAutorizacao(models.TextChoices):
     TRANSPORTE = "TRANSPORTE", "Transporte de lenha"
     VENDA = "VENDA", "Venda de lenha"
-    PRODUCAO_CARVAO = "PRODUCAO_CARVAO", "Produção de carvão"
     EXPEDICAO_CARVAO = "EXPEDICAO_CARVAO", "Expedição de carvão"
     AJUSTE = "AJUSTE", "Ajuste"
     ESTORNO = "ESTORNO", "Estorno"
@@ -1324,13 +1754,6 @@ class AutorizacaoMovimento(RegistroAuditavel):
     data_movimento = models.DateField()
     transporte = models.ForeignKey(
         TransporteLenha,
-        on_delete=models.PROTECT,
-        related_name="movimentos_autorizacao",
-        null=True,
-        blank=True,
-    )
-    producao = models.ForeignKey(
-        ProducaoCarvao,
         on_delete=models.PROTECT,
         related_name="movimentos_autorizacao",
         null=True,

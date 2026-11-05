@@ -273,23 +273,25 @@ document.querySelectorAll("form").forEach((form) => {
 
 document.querySelectorAll("form").forEach((form) => {
   const tipo = form.querySelector("#id_tipo_usuario");
-  const empresa = form.querySelector("#id_empresa");
+  const empresas = form.querySelector("#id_empresas");
   const upcs = form.querySelector("#id_upcs");
-  if (!tipo || !empresa || !upcs) {
+  if (!tipo || !empresas || !upcs) {
     return;
   }
 
   const blocoDe = (campo) => campo.closest(".field") || campo.parentElement;
   const atualizar = () => {
     const gestor = tipo.value !== "admin";
-    blocoDe(empresa).hidden = !gestor;
+    blocoDe(empresas).hidden = !gestor;
     blocoDe(upcs).hidden = !gestor;
-    const secao = blocoDe(empresa).closest("fieldset, section");
+    const secao = blocoDe(empresas).closest("fieldset, section");
     if (secao && secao.contains(blocoDe(upcs))) {
       secao.hidden = !gestor;
     }
+    const marcadas = Array.from(empresas.selectedOptions, (opcao) => opcao.value);
     Array.from(upcs.options).forEach((opcao) => {
-      const visivel = !empresa.value || opcao.dataset.empresa === empresa.value;
+      const visivel =
+        marcadas.length === 0 || marcadas.includes(opcao.dataset.empresa);
       opcao.hidden = !visivel;
       if (!visivel) {
         opcao.selected = false;
@@ -298,7 +300,29 @@ document.querySelectorAll("form").forEach((form) => {
   };
 
   tipo.addEventListener("change", atualizar);
-  empresa.addEventListener("change", atualizar);
+  empresas.addEventListener("change", atualizar);
+  atualizar();
+});
+
+document.querySelectorAll("form").forEach((form) => {
+  const tipo = form.querySelector("#id_tipo");
+  const matriz = form.querySelector("#id_matriz");
+  if (!tipo || !matriz) {
+    return;
+  }
+
+  // Matriz não tem matriz nem descrição de filial: os campos só aparecem na filial.
+  const campos = [matriz, form.querySelector("#id_descricao_filial")]
+    .filter(Boolean)
+    .map((campo) => campo.closest(".field") || campo.parentElement);
+  const atualizar = () => {
+    const filial = tipo.value === "FILIAL";
+    campos.forEach((bloco) => {
+      bloco.hidden = !filial;
+    });
+  };
+
+  tipo.addEventListener("change", atualizar);
   atualizar();
 });
 
@@ -460,6 +484,10 @@ document.querySelectorAll("form[data-rascunho]").forEach((form) => {
     }
     form.querySelectorAll("input[data-mask]").forEach((campo) => {
       campo.dispatchEvent(new Event("input"));
+    });
+    // Campos que mostram ou escondem outros precisam refletir o valor restaurado.
+    ["#id_tipo", "#id_tipo_usuario", "#id_modalidade"].forEach((seletor) => {
+      form.querySelector(seletor)?.dispatchEvent(new Event("change"));
     });
   }
 

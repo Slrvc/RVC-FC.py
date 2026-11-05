@@ -5,10 +5,13 @@
     <div>
       <p class="eyebrow">Cadastros</p>
       <h1>{{ titulo }}</h1>
-      <p class="page-description">{% if somente_leitura %}Dados sincronizados da API oficial do IBGE.{% else %}Consulte e mantenha os registros do sistema.{% endif %}</p>
+      <p class="page-description">{% if consulta_de_encerrada %}Consulta dos registros da empresa encerrada.{% elif somente_leitura %}Dados sincronizados da API oficial do IBGE.{% else %}Consulte e mantenha os registros do sistema.{% endif %}</p>
     </div>
     {% if not somente_leitura %}<a class="button" href="{% url 'novo_registro' recurso %}"><span aria-hidden="true">＋</span> Novo cadastro</a>{% endif %}
   </div>
+  {% if consulta_de_encerrada %}
+    <div class="flash-message" role="status">{{ empresa_ativa }} está encerrada{% if empresa_ativa.data_encerramento %} desde {{ empresa_ativa.data_encerramento|date:"d/m/Y" }}{% endif %}: os registros ficam disponíveis só para consulta.</div>
+  {% endif %}
   <section class="panel" aria-label="Lista de {{ titulo|lower }}">
     <div class="list-toolbar">
       <form class="search-form" method="get" role="search">
@@ -36,7 +39,7 @@
             <tr>
               <td class="empty-state" colspan="20">
                 <strong>{% if termo %}Nenhum resultado encontrado{% else %}Ainda não há registros{% endif %}</strong>
-                <p>{% if termo %}Tente buscar por outro termo.{% elif somente_leitura %}Sincronize os municípios pelo comando `uv run python src\manage.py sincronizar_municipios_ibge`.{% else %}Use “Novo cadastro” para adicionar o primeiro registro.{% endif %}</p>
+                <p>{% if termo %}Tente buscar por outro termo.{% elif consulta_de_encerrada %}A empresa foi encerrada sem registros neste cadastro.{% elif somente_leitura %}Sincronize os municípios pelo comando `uv run python src\manage.py sincronizar_municipios_ibge`.{% else %}Use “Novo cadastro” para adicionar o primeiro registro.{% endif %}</p>
               </td>
             </tr>
           {% endfor %}

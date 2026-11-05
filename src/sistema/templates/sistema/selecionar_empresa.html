@@ -16,7 +16,7 @@
     <section class="auth-form-side">
       <div class="auth-card">
         <h2>Escolha a empresa</h2>
-        <p>Você pode trocar de empresa a qualquer momento pelo menu lateral.</p>
+        <p>Você pode trocar a qualquer momento pelo botão “Trocar empresa”, no topo. Empresas encerradas aparecem no fim da lista, só para consulta.</p>
         <form class="auth-form" method="post">
           {% csrf_token %}
           {% if proximo %}<input type="hidden" name="proximo" value="{{ proximo }}">{% endif %}

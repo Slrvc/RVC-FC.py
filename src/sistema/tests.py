@@ -1,5 +1,6 @@
 import json
 import re
+from datetime import datetime
 from decimal import Decimal
 from gzip import compress as compress_gzip
 from io import BytesIO
@@ -15,6 +16,7 @@ from django.utils import timezone
 
 from sistema.forms import (
     AutorizacaoAmbientalGestorForm,
+    CicloFornoGestorForm,
     ColheitaGestorForm,
     EmpresaForm,
     ExpedicaoGestorForm,
@@ -34,25 +36,33 @@ from sistema.forms import (
     TransporteLenhaGestorForm,
     UPCGestorForm,
     UsuarioForm,
+    sequencia_de_numeros,
 )
 from sistema.models import (
     UPC,
     AutorizacaoAmbiental,
+    BoxLenha,
     CategoriaCusto,
     CentroCusto,
+    CicloForno,
     Empresa,
     Equipamento,
     Estado,
     Fazenda,
     Fornecedor,
+    Forno,
     InventarioFlorestal,
     LancamentoCusto,
     LancamentoCustoRateio,
     Municipio,
+    ParametroEmpresa,
     Plantio,
-    ProducaoCarvao,
     Proprietario,
+    StatusCiclo,
     Talhao,
+    TipoExecucao,
+    TipoForno,
+    Usuario,
 )
 from sistema.views import RECURSOS
 
@@ -60,6 +70,15 @@ ADMIN_CREDENTIAL = "Admin-seguro#7291"
 GESTOR_CREDENTIAL = "Gestor-seguro#7291"
 INITIAL_CREDENTIAL = "Inicial-seguro#7291"
 NEW_CREDENTIAL = "Nova-senha-segura#9382"
+
+
+def criar_usuario(empresa: Empresa | None = None, **dados: object):
+    """Cria o usuário já ligado à matriz e com acesso à empresa informada."""
+    matriz_id = empresa.matriz_da_conta_id if empresa else None
+    usuario = get_user_model().objects.create_user(matriz_id=matriz_id, **dados)
+    if empresa is not None:
+        usuario.empresas.add(empresa)
+    return usuario
 
 
 class FluxoAdministrativoTests(TestCase):
@@ -88,7 +107,7 @@ class FluxoAdministrativoTests(TestCase):
         cls.administrador.primeiro_acesso = False
         cls.administrador.save(update_fields=["primeiro_acesso"])
 
-        cls.gestor = usuario_modelo.objects.create_user(
+        cls.gestor = criar_usuario(
             username="gestor",
             email="gestor@example.com",
             password=GESTOR_CREDENTIAL,
@@ -133,7 +152,7 @@ class FluxoAdministrativoTests(TestCase):
         )
 
     def test_usuario_novo_precisa_trocar_senha(self):
-        usuario = get_user_model().objects.create_user(
+        usuario = criar_usuario(
             username="primeiro",
             email="primeiro@example.com",
             password=INITIAL_CREDENTIAL,
@@ -147,7 +166,7 @@ class FluxoAdministrativoTests(TestCase):
         self.assertRedirects(resposta, reverse("password_change"))
 
     def test_troca_de_senha_libera_acesso(self):
-        usuario = get_user_model().objects.create_user(
+        usuario = criar_usuario(
             username="primeiro",
             email="primeiro@example.com",
             password=INITIAL_CREDENTIAL,
@@ -295,36 +314,217 @@ class FluxoAdministrativoTests(TestCase):
         self.assertEqual(aceito.status_code, 302)
         self.assertEqual(lancamento.percentual_rateado, Decimal("100"))
 
-    def test_producao_carvao_calcula_rendimento_e_alerta(self):
+    def _criar_upc_com_forno(self, nome: str = "U1") -> tuple[UPC, Forno]:
         upc = UPC.objects.create(
             empresa=self.empresa,
             fazenda=self.fazenda_propria,
-            nome="U1",
+            nome=nome,
             utm_leste="1",
             utm_norte="1",
-            numero_fornos=1,
-            volume_forno_mdc="1",
             ciclo_producao_dias=8,
         )
-        producao = ProducaoCarvao.objects.create(
+        tipo, _ = TipoForno.objects.get_or_create(
             empresa=self.empresa,
-            upc=upc,
-            data_producao="2026-01-10",
-            volume_mdc=Decimal("77"),
-            volume_lenha_m3=Decimal("100"),
+            nome="Circular 5,5 m",
+            defaults={"diametro_m": "5.50", "capacidade_mdc": "18"},
         )
-        self.assertEqual(producao.rendimento_mdc_m3, Decimal("0.7700"))
-        self.assertEqual(producao.alerta_rendimento, "")
-        producao.volume_mdc = Decimal("30")
-        producao.save()
-        self.assertEqual(producao.alerta_rendimento, "Abaixo do esperado")
+        forno = Forno.objects.create(
+            empresa=self.empresa, upc=upc, tipo_forno=tipo, numero="F01"
+        )
+        return upc, forno
 
-        self.client.force_login(self.gestor)
-        resposta = self.client.post(
-            reverse("novo_registro", args=["producoes-carvao"]),
-            {"upc": upc.pk, "data_producao": "2026-02-01", "volume_mdc": "10"},
+    def test_ciclo_forno_calcula_fatores_status_e_alerta(self):
+        _, forno = self._criar_upc_com_forno()
+        ciclo = CicloForno.objects.create(
+            empresa=self.empresa,
+            forno=forno,
+            data_inicio_enchimento=datetime.fromisoformat("2026-01-01T08:00Z"),
+            volume_lenha_enchimento=Decimal("40"),
         )
-        self.assertEqual(resposta.status_code, 302)
+        self.assertEqual(ciclo.numero_ciclo, 1)
+        self.assertEqual(ciclo.status, StatusCiclo.ENCHIMENTO)
+        self.assertEqual(ciclo.fator_conversao, Decimal("1.5"))
+        self.assertEqual(ciclo.volume_lenha_m3, Decimal("26.667"))
+        self.assertEqual(ciclo.alerta_fator, "")
+
+        ciclo.data_acendimento = datetime.fromisoformat("2026-01-02T08:00Z")
+        ciclo.data_fim_carbonizacao = datetime.fromisoformat("2026-01-05T20:00Z")
+        ciclo.data_descarga = datetime.fromisoformat("2026-01-09T08:00Z")
+        ciclo.volume_mdc = Decimal("20")
+        ciclo.save()
+        ciclo.refresh_from_db()
+        self.assertEqual(ciclo.status, StatusCiclo.DESCARREGADO)
+        self.assertEqual(ciclo.dias_carbonizacao, Decimal("3.50"))
+        self.assertEqual(ciclo.dias_resfriamento, Decimal("3.50"))
+        self.assertEqual(ciclo.dias_ciclo, Decimal("8.00"))
+        self.assertEqual(ciclo.fator_mst_por_mdc, Decimal("2.0000"))
+        self.assertEqual(ciclo.fator_m3_por_mdc, Decimal("1.3333"))
+        self.assertEqual(ciclo.alerta_fator, "")
+
+        ciclo.volume_mdc = Decimal("10")
+        ciclo.save()
+        self.assertEqual(ciclo.alerta_fator, "Consumo de lenha acima do ideal")
+
+        ParametroEmpresa.objects.create(
+            empresa=self.empresa,
+            fator_mst_por_m3=Decimal("1.6"),
+            tolerancia_fator_pct=Decimal("150"),
+        )
+        self.assertEqual(ciclo.alerta_fator, "")
+        segundo = CicloForno.objects.create(
+            empresa=self.empresa,
+            forno=forno,
+            data_inicio_enchimento=datetime.fromisoformat("2026-01-10T08:00Z"),
+            volume_lenha_enchimento=Decimal("40"),
+        )
+        self.assertEqual(segundo.numero_ciclo, 2)
+        self.assertEqual(segundo.fator_conversao, Decimal("1.6"))
+
+    def test_ciclo_terceirizado_calcula_valor_do_empreiteiro(self):
+        _, forno = self._criar_upc_com_forno()
+        empreiteiro = Fornecedor.objects.create(
+            empresa=self.empresa,
+            nome_razao_social="Empreiteiro",
+            cpf_cnpj="111.222.333-44",
+            fornece_servico=True,
+        )
+        ciclo = CicloForno.objects.create(
+            empresa=self.empresa,
+            forno=forno,
+            data_inicio_enchimento=datetime.fromisoformat("2026-01-01T08:00Z"),
+            data_acendimento=datetime.fromisoformat("2026-01-01T18:00Z"),
+            data_fim_carbonizacao=datetime.fromisoformat("2026-01-04T18:00Z"),
+            data_descarga=datetime.fromisoformat("2026-01-08T08:00Z"),
+            volume_lenha_enchimento=Decimal("40"),
+            volume_mdc=Decimal("19.5"),
+            tipo_execucao=TipoExecucao.TERCEIRIZADA,
+            fornecedor=empreiteiro,
+            valor_mdc=Decimal("12"),
+        )
+        self.assertEqual(ciclo.valor_producao, Decimal("234.00"))
+
+    def test_formulario_do_ciclo_valida_etapas_e_ciclo_em_andamento(self):
+        _, forno = self._criar_upc_com_forno()
+        self.client.force_login(self.gestor)
+        url = reverse("novo_registro", args=["ciclos-forno"])
+        base = {
+            "forno": forno.pk,
+            "data_inicio_enchimento": "2026-03-01T08:00",
+            "volume_lenha_enchimento": "40",
+            "fator_conversao": "1.5",
+            "tipo_execucao": "PROPRIA",
+        }
+
+        fora_de_ordem = self.client.post(
+            url, {**base, "data_fim_carbonizacao": "2026-03-02T08:00"}
+        )
+        self.assertEqual(fora_de_ordem.status_code, 200)
+        self.assertContains(fora_de_ordem, "Preencha o acendimento primeiro.")
+
+        antes = self.client.post(
+            url, {**base, "data_acendimento": "2026-02-28T08:00"}
+        )
+        self.assertContains(antes, "Não pode ser antes do início do enchimento.")
+
+        sem_carvao = self.client.post(
+            url,
+            {
+                **base,
+                "data_acendimento": "2026-03-01T18:00",
+                "data_fim_carbonizacao": "2026-03-04T18:00",
+                "data_descarga": "2026-03-08T08:00",
+            },
+        )
+        self.assertContains(sem_carvao, "Informe o carvão medido na descarga.")
+
+        terceirizado = self.client.post(url, {**base, "tipo_execucao": "TERCEIRIZADA"})
+        self.assertContains(terceirizado, "Obrigatório na produção terceirizada.")
+
+        self.assertEqual(self.client.post(url, base).status_code, 302)
+        em_andamento = self.client.post(url, base)
+        self.assertContains(em_andamento, "já tem um ciclo em andamento")
+
+        ciclo = CicloForno.objects.get()
+        cancelar = self.client.post(
+            reverse("editar_registro", args=["ciclos-forno", ciclo.pk]),
+            {**base, "cancelado": "on"},
+        )
+        self.assertEqual(cancelar.status_code, 302)
+        ciclo.refresh_from_db()
+        self.assertEqual(ciclo.status, StatusCiclo.CANCELADO)
+        self.assertEqual(self.client.post(url, base).status_code, 302)
+        self.assertEqual(
+            CicloForno.objects.order_by("numero_ciclo").last().numero_ciclo, 2
+        )
+
+    def test_fornos_em_lote_seguem_a_numeracao(self):
+        self.assertEqual(sequencia_de_numeros("F08", 3), ["F08", "F09", "F10"])
+        self.assertEqual(sequencia_de_numeros("F9", 2), ["F09", "F10"])
+        with self.assertRaises(ValueError):
+            sequencia_de_numeros("A", 2)
+
+        upc, forno = self._criar_upc_com_forno()
+        self.client.force_login(self.gestor)
+        url = reverse("novo_registro", args=["fornos"])
+        dados = {
+            "upc": upc.pk,
+            "tipo_forno": forno.tipo_forno_id,
+            "numero": "F02",
+            "quantidade": "3",
+            "situacao": "ATIVO",
+        }
+        self.assertEqual(self.client.post(url, dados).status_code, 302)
+        self.assertEqual(
+            list(upc.fornos.values_list("numero", flat=True)),
+            ["F01", "F02", "F03", "F04"],
+        )
+        self.assertEqual(upc.numero_fornos, 4)
+        self.assertEqual(upc.volume_ciclo_mdc, Decimal("72"))
+
+        repetido = self.client.post(url, {**dados, "numero": "F04", "quantidade": "2"})
+        self.assertContains(repetido, "Já existem na UPC: F04.")
+        self.assertEqual(upc.fornos.count(), 4)
+
+        forno.situacao = "DESATIVADO"
+        forno.save()
+        self.assertEqual(upc.numero_fornos, 3)
+        self.assertEqual(upc.volume_ciclo_mdc, Decimal("54"))
+
+    def test_box_de_lenha_precisa_ser_da_upc_do_forno(self):
+        _, forno = self._criar_upc_com_forno()
+        outra_upc, _ = self._criar_upc_com_forno("U2")
+        box_alheio = BoxLenha.objects.create(
+            empresa=self.empresa, upc=outra_upc, numero="B01"
+        )
+        formulario = CicloFornoGestorForm(
+            {
+                "forno": forno.pk,
+                "box_lenha": box_alheio.pk,
+                "data_inicio_enchimento": "2026-03-01T08:00",
+                "volume_lenha_enchimento": "40",
+                "fator_conversao": "1.5",
+                "tipo_execucao": "PROPRIA",
+            },
+            empresa=self.empresa,
+        )
+        self.assertFalse(formulario.is_valid())
+        self.assertEqual(formulario.errors["box_lenha"], ["O box é de outra UPC."])
+
+    def test_parametros_de_producao_sao_unicos_por_empresa(self):
+        self.client.force_login(self.gestor)
+        url = reverse("novo_registro", args=["parametros-producao"])
+        dados = {
+            "fator_mst_por_m3": "1.45",
+            "fator_m3_por_mdc_ideal": "1.33",
+            "fator_mst_por_mdc_ideal": "2",
+            "controle_estoque_talhao": "COLHIDA",
+        }
+        self.assertEqual(self.client.post(url, dados).status_code, 302)
+        self.assertEqual(
+            ParametroEmpresa.da_empresa(self.empresa.pk).fator_mst_por_m3,
+            Decimal("1.45"),
+        )
+        self.assertContains(self.client.post(url, dados), "já tem parâmetros")
 
     def test_tela_de_escolha_mostra_tipo_cidade_e_cnpj(self):
         self.outra_empresa.tipo = "FILIAL"
@@ -367,22 +567,24 @@ class FluxoAdministrativoTests(TestCase):
         self.client.force_login(self.administrador)
 
         resposta = self.client.get(reverse("inicio"))
-        self.assertEqual(resposta.status_code, 200)
-        self.assertContains(resposta, "Visão geral")
-        self.assertContains(resposta, "Selecionar empresa")
-        self.assertContains(resposta, reverse("selecionar_empresa"))
-        self.assertContains(resposta, "Trocar empresa")
+        self.assertRedirects(
+            resposta,
+            f"{reverse('selecionar_empresa')}?proximo={reverse('inicio')}",
+            fetch_redirect_response=False,
+        )
 
         self.client.post(reverse("selecionar_empresa"), {"empresa": self.empresa.pk})
-        self.assertEqual(self.client.get(reverse("inicio")).status_code, 200)
+        inicio = self.client.get(reverse("inicio"))
+        self.assertEqual(inicio.status_code, 200)
+        self.assertContains(inicio, "Trocar empresa")
 
         resposta = self.client.get(reverse("novo_registro", args=["upcs"]))
         self.assertNotIn("empresa", resposta.context["formulario"].fields)
 
         resposta = self.client.get(reverse("lista_registros", args=["fazendas"]))
         self.assertContains(resposta, "Fazenda da unidade")
-        self.assertContains(resposta, "Fazenda de outra empresa")
-        self.assertIn("Empresa", resposta.context["colunas"])
+        self.assertNotContains(resposta, "Fazenda de outra empresa")
+        self.assertNotIn("Empresa", resposta.context["colunas"])
 
     def test_coluna_empresa_nao_aparece_na_lista_do_gestor(self):
         self.client.force_login(self.gestor)
@@ -403,13 +605,17 @@ class FluxoAdministrativoTests(TestCase):
             fetch_redirect_response=False,
         )
 
-    def test_administrador_abre_cadastros_sem_escolher_empresa(self):
+    def test_configuracoes_gerais_nao_pedem_empresa_ativa(self):
         self.client.force_login(self.administrador)
 
-        for recurso in ("upcs", "fazendas"):
+        for recurso in ("empresas", "usuarios", "estados", "municipios-ibge"):
             with self.subTest(recurso=recurso):
                 resposta = self.client.get(reverse("lista_registros", args=[recurso]))
                 self.assertEqual(resposta.status_code, 200)
+        for recurso in ("upcs", "fazendas"):
+            with self.subTest(recurso=recurso):
+                resposta = self.client.get(reverse("lista_registros", args=[recurso]))
+                self.assertEqual(resposta.status_code, 302)
 
     def test_selecao_de_upc_preserva_destino_do_menu(self):
         dados_upc = {
@@ -417,8 +623,6 @@ class FluxoAdministrativoTests(TestCase):
             "fazenda": self.fazenda_propria,
             "utm_leste": "1",
             "utm_norte": "1",
-            "numero_fornos": 1,
-            "volume_forno_mdc": "1",
             "ciclo_producao_dias": 1,
         }
         upc = UPC.objects.create(nome="UPC A", **dados_upc)
@@ -581,7 +785,8 @@ class FluxoAdministrativoTests(TestCase):
                 "tipo_usuario": "gestor",
                 "nome_completo": "Novo Gestor",
                 "email": "novo@example.com",
-                "empresa": self.empresa.pk,
+                "matriz": self.empresa.pk,
+                "empresas": [self.empresa.pk],
                 "is_active": "on",
                 "senha": GESTOR_CREDENTIAL,
             },
@@ -596,25 +801,29 @@ class FluxoAdministrativoTests(TestCase):
         self.assertTrue(usuario.primeiro_acesso)
         self.assertEqual(usuario.usuario_inclusao, self.administrador)
 
-    def test_administrador_cria_outro_administrador_sem_empresa(self):
+    def test_administrador_da_matriz_nao_vira_superusuario(self):
         self.client.force_login(self.administrador)
+        dados = {
+            "username": "novo-adm",
+            "tipo_usuario": "admin",
+            "nome_completo": "Novo Adm",
+            "email": "adm@example.com",
+            "is_active": "on",
+            "senha": GESTOR_CREDENTIAL,
+        }
+
+        sem_matriz = self.client.post(reverse("novo_registro", args=["usuarios"]), dados)
+        self.assertContains(sem_matriz, "Selecione a matriz do usuário.")
 
         self.client.post(
             reverse("novo_registro", args=["usuarios"]),
-            {
-                "username": "novo-adm",
-                "tipo_usuario": "admin",
-                "nome_completo": "Novo Adm",
-                "email": "adm@example.com",
-                "is_active": "on",
-                "senha": GESTOR_CREDENTIAL,
-            },
+            {**dados, "matriz": self.empresa.pk},
         )
-
         usuario = get_user_model().objects.get(username="novo-adm")
-        self.assertTrue(usuario.is_superuser)
-        self.assertTrue(usuario.is_staff)
-        self.assertIsNone(usuario.empresa)
+        self.assertFalse(usuario.is_superuser)
+        self.assertFalse(usuario.is_staff)
+        self.assertEqual(usuario.matriz, self.empresa)
+        self.assertFalse(usuario.empresas.exists())
 
     def test_tela_de_empresa_exibe_campos_em_secoes(self):
         self.client.force_login(self.administrador)
@@ -801,7 +1010,7 @@ class FluxoAdministrativoTests(TestCase):
             tela_talhoes,
             f'data-plantios-url="{reverse("plantios_por_fazenda")}"',
         )
-        self.assertContains(tela_talhoes, "/static/sistema/app.js?v=8")
+        self.assertContains(tela_talhoes, "/static/sistema/app.js?v=11")
 
         outra = PlantioGestorForm(
             {
@@ -954,8 +1163,6 @@ class FluxoAdministrativoTests(TestCase):
             "utm_leste": "574452.91",
             "utm_norte": "7897888.65",
             "utm_fuso": "23K",
-            "numero_fornos": 66,
-            "volume_forno_mdc": "18",
             "ciclo_producao_dias": 8,
         }
         form = UPCGestorForm(dados, empresa=self.empresa)
@@ -963,6 +1170,15 @@ class FluxoAdministrativoTests(TestCase):
         upc = form.save(commit=False)
         upc.empresa = self.empresa
         upc.save()
+        self.assertEqual(upc.numero_fornos, 0)
+        tipo = TipoForno.objects.create(
+            empresa=self.empresa, nome="Circular", capacidade_mdc="18"
+        )
+        Forno.objects.bulk_create(
+            Forno(empresa=self.empresa, upc=upc, tipo_forno=tipo, numero=f"F{n:02d}")
+            for n in range(1, 67)
+        )
+        self.assertEqual(upc.numero_fornos, 66)
         self.assertEqual(upc.volume_ciclo_mdc, 1188)
         self.assertEqual(str(upc.volume_mes_mdc), "4455.00")
 
@@ -1172,8 +1388,6 @@ class FluxoAdministrativoTests(TestCase):
             "fazenda": fazenda,
             "utm_leste": "1",
             "utm_norte": "1",
-            "numero_fornos": 1,
-            "volume_forno_mdc": "1",
             "ciclo_producao_dias": 1,
         }
         outra_fazenda = Fazenda.objects.create(
@@ -1382,8 +1596,6 @@ class FluxoAdministrativoTests(TestCase):
             nome="U2",
             utm_leste="1",
             utm_norte="1",
-            numero_fornos=1,
-            volume_forno_mdc="1",
             ciclo_producao_dias=8,
         )
         form = TransporteLenhaGestorForm(
@@ -1538,8 +1750,6 @@ class FluxoAdministrativoTests(TestCase):
             nome="U1",
             utm_leste="1",
             utm_norte="1",
-            numero_fornos=1,
-            volume_forno_mdc="1",
             ciclo_producao_dias=8,
         )
         upc_outra_empresa = UPC.objects.create(
@@ -1548,8 +1758,6 @@ class FluxoAdministrativoTests(TestCase):
             nome="U2",
             utm_leste="1",
             utm_norte="1",
-            numero_fornos=1,
-            volume_forno_mdc="1",
             ciclo_producao_dias=8,
         )
         self.client.force_login(self.administrador)
@@ -1613,8 +1821,6 @@ class FluxoAdministrativoTests(TestCase):
             nome="U3",
             utm_leste="1",
             utm_norte="1",
-            numero_fornos=1,
-            volume_forno_mdc="1",
             ciclo_producao_dias=8,
         )
         completa = {
@@ -1773,7 +1979,8 @@ class FluxoAdministrativoTests(TestCase):
         self.outra_empresa.descricao_filial = "Filial 02 - Alpinópolis"
         self.outra_empresa.save()
         self.client.force_login(self.administrador)
-        self.assertContains(self.client.get(reverse("inicio")), "Todas as empresas")
+        self.client.post(reverse("selecionar_empresa"), {"empresa": self.empresa.pk})
+        self.assertNotContains(self.client.get(reverse("inicio")), "Filial 02")
 
         self.client.post(
             reverse("selecionar_empresa"), {"empresa": self.outra_empresa.pk}
@@ -1781,10 +1988,9 @@ class FluxoAdministrativoTests(TestCase):
 
         resposta = self.client.get(reverse("inicio"))
         self.assertContains(resposta, "Filial 02 - Alpinópolis")
-        self.assertNotContains(resposta, "Todas as empresas")
 
     def test_operador_ve_e_acessa_apenas_producao(self):
-        operador = get_user_model().objects.create_user(
+        operador = criar_usuario(
             username="oper",
             password="x",
             nome_completo="Operador",
@@ -1803,6 +2009,16 @@ class FluxoAdministrativoTests(TestCase):
         )
         self.assertEqual(
             self.client.get(reverse("lista_registros", args=["fazendas"])).status_code,
+            403,
+        )
+        self.assertEqual(
+            self.client.get(
+                reverse("lista_registros", args=["ciclos-forno"])
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.get(reverse("lista_registros", args=["fornos"])).status_code,
             403,
         )
 
@@ -2014,3 +2230,243 @@ class SenhaLivreTests(TestCase):
         self.assertEqual(resposta.status_code, 302)
         usuario.refresh_from_db()
         self.assertTrue(usuario.check_password("1"))
+
+
+class ContasPorMatrizTests(TestCase):
+    """Cada matriz é um cliente do sistema: não enxerga os dados de outra."""
+
+    @classmethod
+    def setUpTestData(cls) -> None:
+        estado = Estado.objects.create(codigo=31, uf="MG", nome="Minas Gerais")
+        cls.municipio = Municipio.objects.create(
+            codigo="3120904", nome="Curvelo", estado=estado
+        )
+        cls.matriz_a = cls.criar_empresa("Cliente A", "11.111.111/0001-91")
+        cls.filial_a1 = cls.criar_empresa(
+            "Cliente A", "11.111.111/0002-72", matriz=cls.matriz_a, filial="Filial 01"
+        )
+        cls.filial_a2 = cls.criar_empresa(
+            "Cliente A", "11.111.111/0003-53", matriz=cls.matriz_a, filial="Filial 02"
+        )
+        cls.matriz_b = cls.criar_empresa("Cliente B", "22.222.222/0001-91")
+        cls.admin_a = criar_usuario(
+            username="admin-a",
+            password="x",
+            nome_completo="Admin A",
+            tipo_usuario="admin",
+            primeiro_acesso=False,
+        )
+        cls.admin_a.matriz = cls.matriz_a
+        cls.admin_a.save()
+        for nome, empresa in (("Fazenda A1", cls.filial_a1), ("Fazenda B", cls.matriz_b)):
+            Fazenda.objects.create(
+                empresa=empresa,
+                proprietario=Proprietario.objects.create(
+                    empresa=empresa, nome_razao_social=f"Dono {nome}"
+                ),
+                nome=nome,
+                area_total_ha="10",
+                municipio=cls.municipio,
+            )
+
+    @classmethod
+    def criar_empresa(
+        cls, nome: str, cnpj: str, matriz: Empresa | None = None, filial: str = ""
+    ) -> Empresa:
+        return Empresa.objects.create(
+            tipo="FILIAL" if matriz else "MATRIZ",
+            matriz=matriz,
+            descricao_filial=filial,
+            cnpj=cnpj,
+            razao_social=nome,
+            endereco="Rua A",
+            bairro="Centro",
+            municipio=cls.municipio,
+        )
+
+    def criar_upc(self, empresa: Empresa, nome: str) -> UPC:
+        return UPC.objects.create(
+            empresa=empresa,
+            fazenda=Fazenda.objects.filter(empresa=empresa).first()
+            or Fazenda.objects.create(
+                empresa=empresa,
+                proprietario=Proprietario.objects.create(
+                    empresa=empresa, nome_razao_social="Dono"
+                ),
+                nome=f"Fazenda {nome}",
+                area_total_ha="1",
+                municipio=self.municipio,
+            ),
+            nome=nome,
+            utm_leste="1",
+            utm_norte="1",
+            ciclo_producao_dias=8,
+        )
+
+    def test_administrador_so_ve_a_propria_matriz(self):
+        self.client.force_login(self.admin_a)
+
+        empresas = self.client.get(reverse("lista_registros", args=["empresas"]))
+        self.assertEqual(
+            {linha["objeto"] for linha in empresas.context["linhas"]},
+            {self.matriz_a, self.filial_a1, self.filial_a2},
+        )
+        outra = self.client.post(
+            reverse("selecionar_empresa"), {"empresa": self.matriz_b.pk}
+        )
+        self.assertEqual(outra.status_code, 200)
+        self.assertIn("empresa", outra.context["formulario"].errors)
+        self.assertEqual(
+            self.client.get(
+                reverse("editar_registro", args=["empresas", self.matriz_b.pk])
+            ).status_code,
+            404,
+        )
+
+        self.client.post(reverse("selecionar_empresa"), {"empresa": self.filial_a1.pk})
+        fazendas = self.client.get(reverse("lista_registros", args=["fazendas"]))
+        self.assertContains(fazendas, "Fazenda A1")
+        self.assertNotContains(fazendas, "Fazenda B")
+        fazenda_b = Fazenda.objects.get(nome="Fazenda B")
+        self.assertEqual(
+            self.client.get(
+                reverse("editar_registro", args=["fazendas", fazenda_b.pk])
+            ).status_code,
+            404,
+        )
+
+    def test_administrador_cadastra_filial_e_usuarios_so_da_propria_matriz(self):
+        self.client.force_login(self.admin_a)
+        tela = self.client.get(reverse("novo_registro", args=["empresas"]))
+        self.assertNotIn("tipo", tela.context["formulario"].fields)
+        self.assertNotIn("matriz", tela.context["formulario"].fields)
+        resposta = self.client.post(
+            reverse("novo_registro", args=["empresas"]),
+            {
+                "descricao_filial": "Filial 03 - Corinto",
+                "cnpj": "11.111.111/0004-34",
+                "razao_social": "Cliente A",
+                "estado": self.municipio.estado_id,
+                "municipio": self.municipio.pk,
+                "endereco": "Rua B",
+                "bairro": "Centro",
+            },
+        )
+        self.assertEqual(resposta.status_code, 302)
+        nova = Empresa.objects.get(cnpj="11.111.111/0004-34")
+        self.assertEqual((nova.tipo, nova.matriz), ("FILIAL", self.matriz_a))
+
+        dados = {
+            "username": "gestor-a",
+            "tipo_usuario": "gestor",
+            "nome_completo": "Gestor A",
+            "email": "g@example.com",
+            "is_active": "on",
+            "senha": GESTOR_CREDENTIAL,
+            "empresas": [self.matriz_b.pk],
+        }
+        alheia = self.client.post(reverse("novo_registro", args=["usuarios"]), dados)
+        self.assertIn("empresas", alheia.context["formulario"].errors)
+        dados["empresas"] = [self.filial_a1.pk, self.filial_a2.pk]
+        self.client.post(reverse("novo_registro", args=["usuarios"]), dados)
+        gestor = Usuario.objects.get(username="gestor-a")
+        self.assertEqual(gestor.matriz, self.matriz_a)
+        self.assertFalse(gestor.is_superuser)
+
+        usuarios = self.client.get(reverse("lista_registros", args=["usuarios"]))
+        nomes = {linha["objeto"].username for linha in usuarios.context["linhas"]}
+        self.assertEqual(nomes, {"admin-a", "gestor-a"})
+
+    def test_gestor_com_uma_empresa_e_uma_upc_entra_direto(self):
+        upc = self.criar_upc(self.filial_a1, "UPC A1")
+        gestor = criar_usuario(
+            username="g1",
+            password="x",
+            nome_completo="G1",
+            empresa=self.filial_a1,
+            primeiro_acesso=False,
+        )
+        self.client.force_login(gestor)
+
+        self.assertEqual(self.client.get(reverse("inicio")).status_code, 200)
+        self.assertEqual(
+            self.client.session["empresa_ativa_id"], self.filial_a1.pk
+        )
+        self.assertEqual(self.client.session["upc_ativa_id"], upc.pk)
+        self.assertNotContains(self.client.get(reverse("inicio")), "Trocar empresa")
+
+    def test_gestor_com_duas_empresas_escolhe_entre_as_liberadas(self):
+        gestor = criar_usuario(
+            username="g2",
+            password="x",
+            nome_completo="G2",
+            empresa=self.filial_a1,
+            primeiro_acesso=False,
+        )
+        gestor.empresas.add(self.filial_a2)
+        self.client.force_login(gestor)
+
+        resposta = self.client.get(reverse("lista_registros", args=["fazendas"]))
+        self.assertEqual(resposta.status_code, 302)
+        self.assertTrue(resposta["Location"].startswith(reverse("selecionar_empresa")))
+        tela = self.client.get(reverse("selecionar_empresa"))
+        self.assertEqual(
+            set(tela.context["formulario"].fields["empresa"].queryset),
+            {self.filial_a1, self.filial_a2},
+        )
+
+    def test_empresa_encerrada_fica_so_para_consulta(self):
+        self.filial_a2.data_encerramento = "2026-06-30"
+        self.filial_a2.motivo_encerramento = "Fim da floresta"
+        self.filial_a2.save()
+        gestor = criar_usuario(
+            username="g3",
+            password="x",
+            nome_completo="G3",
+            empresa=self.filial_a1,
+            primeiro_acesso=False,
+        )
+        gestor.empresas.add(self.filial_a2)
+        self.client.force_login(gestor)
+
+        self.client.get(reverse("inicio"))
+        self.assertEqual(self.client.session["empresa_ativa_id"], self.filial_a1.pk)
+
+        self.client.post(reverse("selecionar_empresa"), {"empresa": self.filial_a2.pk})
+        lista = self.client.get(reverse("lista_registros", args=["fazendas"]))
+        self.assertContains(lista, "só para consulta")
+        self.assertNotContains(lista, reverse("novo_registro", args=["fazendas"]))
+        novo = self.client.get(reverse("novo_registro", args=["fazendas"]))
+        self.assertRedirects(
+            novo,
+            reverse("lista_registros", args=["fazendas"]),
+            fetch_redirect_response=False,
+        )
+
+    def test_encerramento_exige_motivo(self):
+        formulario = EmpresaForm(
+            {"tipo": "MATRIZ", "data_encerramento": "2026-06-30"}
+        )
+        formulario.is_valid()
+        self.assertIn("motivo_encerramento", formulario.errors)
+
+    def test_menu_agrupa_por_categoria_conforme_o_perfil(self):
+        operador = criar_usuario(
+            username="op",
+            password="x",
+            nome_completo="Op",
+            empresa=self.filial_a1,
+            tipo_usuario="operador",
+            primeiro_acesso=False,
+        )
+        self.client.force_login(operador)
+        grupos = {g["titulo"] for g in self.client.get(reverse("inicio")).context["menu"]}
+        self.assertEqual(grupos, {"Florestal", "Produção", "Transporte e vendas"})
+
+        self.client.force_login(self.admin_a)
+        self.client.post(reverse("selecionar_empresa"), {"empresa": self.filial_a1.pk})
+        resposta = self.client.get(reverse("lista_registros", args=["fornos"]))
+        menu = resposta.context["menu"]
+        self.assertIn("Configurações", {g["titulo"] for g in menu})
+        abertos = [g["titulo"] for g in menu if g["aberto"]]
+        self.assertEqual(abertos, ["Produção"])

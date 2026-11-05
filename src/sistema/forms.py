@@ -1,5 +1,6 @@
 import json
 from decimal import Decimal
+from itertools import pairwise
 from typing import TYPE_CHECKING
 
 from django import forms
@@ -9,11 +10,14 @@ from django.db.models import Q, Sum
 from sistema.formatacao import MASCARAS_POR_CAMPO, MENSAGENS, normalizar
 from sistema.models import (
     EQUIPAMENTOS_POR_SISTEMA,
+    STATUS_CICLO_ATIVO,
     UPC,
     AutorizacaoAmbiental,
     BaseVolume,
+    BoxLenha,
     CategoriaCusto,
     CentroCusto,
+    CicloForno,
     Cliente,
     Colheita,
     DestinoLenha,
@@ -23,21 +27,29 @@ from sistema.models import (
     Estado,
     Expedicao,
     Fazenda,
+    FormatoForno,
     Fornecedor,
+    Forno,
     InventarioFlorestal,
     InventarioTalhao,
     LancamentoCusto,
     LancamentoCustoRateio,
     Modalidade,
     Municipio,
+    NivelMecanizacao,
     OrigemAutorizacao,
+    ParametroEmpresa,
     Parametros,
     Plantio,
-    ProducaoCarvao,
     ProdutoAutorizado,
     Proprietario,
+    SituacaoForno,
     StatusAutorizacao,
+    StatusCiclo,
     Talhao,
+    TipoEmpresa,
+    TipoExecucao,
+    TipoForno,
     TipoTransporte,
     TipoUsuario,
     TransporteLenha,
@@ -66,14 +78,19 @@ class UPCsSelectWidget(forms.Select):
 
 class ContextoEmpresaForm(forms.Form):
     empresa = forms.ModelChoiceField(
-        queryset=Empresa.objects.select_related("municipio__estado"),
+        queryset=Empresa.objects.none(),
         label="Empresa",
         empty_label=None,
     )
 
-    def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+    def __init__(self, *args, empresas, **kwargs) -> None:  # noqa: ANN002, ANN003
         super().__init__(*args, **kwargs)
-        self.fields["empresa"].label_from_instance = lambda e: e.identificacao
+        campo = self.fields["empresa"]
+        # Ativas primeiro; as encerradas ficam no fim, só para consulta.
+        campo.queryset = empresas.select_related("municipio__estado").order_by(
+            "data_encerramento", "razao_social", "cnpj"
+        )
+        campo.label_from_instance = lambda e: e.identificacao
 
 
 class ContextoUPCForm(forms.Form):
@@ -192,12 +209,14 @@ class FormularioComMunicipio(FormularioEmSecoes):
 
 
 class EmpresaForm(FormularioComMunicipio):
+    recebe_usuario = True
     secoes_campos = (
         (
             "Identificação da empresa",
-            "Informe os dados fiscais e os nomes usados pela unidade.",
+            "A matriz é a conta do cliente; cada filial pertence a uma matriz.",
             (
                 "tipo",
+                "matriz",
                 "descricao_filial",
                 "cnpj",
                 "razao_social",
@@ -224,12 +243,18 @@ class EmpresaForm(FormularioComMunicipio):
             "Canais de contato da empresa.",
             ("telefone", "celular", "email", "site"),
         ),
+        (
+            "Encerramento",
+            "Floresta finda ou unidade fechada: os dados ficam só para consulta.",
+            ("data_encerramento", "motivo_encerramento"),
+        ),
     )
 
     class Meta:
         model = Empresa
         fields = [
             "tipo",
+            "matriz",
             "descricao_filial",
             "cnpj",
             "razao_social",
@@ -247,9 +272,13 @@ class EmpresaForm(FormularioComMunicipio):
             "celular",
             "email",
             "site",
+            "data_encerramento",
+            "motivo_encerramento",
         ]
+        widgets = {"data_encerramento": forms.DateInput(attrs={"type": "date"})}
         labels = {
             "tipo": "Tipo da unidade",
+            "matriz": "Matriz",
             "razao_social": "Razão social",
             "nome_fantasia": "Nome fantasia",
             "inscricao_estadual": "Inscrição estadual",
@@ -265,9 +294,35 @@ class EmpresaForm(FormularioComMunicipio):
             "site": "Informe o endereço completo, incluindo https://.",
         }
 
+    def __init__(self, *args, usuario=None, **kwargs) -> None:  # noqa: ANN002, ANN003
+        super().__init__(*args, **kwargs)
+        self.usuario = usuario
+        self.fields["matriz"].label_from_instance = lambda e: e.identificacao
+        self.fields["matriz"].queryset = Empresa.objects.filter(
+            tipo=TipoEmpresa.MATRIZ
+        ).exclude(pk=self.instance.pk)
+        if usuario is not None and not usuario.is_superuser:
+            # O administrador da matriz só cadastra filiais da própria conta.
+            del self.fields["tipo"]
+            del self.fields["matriz"]
+
+    @property
+    def _restrito_a_conta(self) -> bool:
+        return "tipo" not in self.fields
+
     def clean(self):
         dados = super().clean()
-        if dados.get("tipo") == "FILIAL":
+        if self._restrito_a_conta:
+            if self.instance.pk:
+                tipo = self.instance.tipo
+            else:
+                tipo = TipoEmpresa.FILIAL
+                self.instance.tipo = tipo
+                self.instance.matriz_id = self.usuario.matriz_id
+        else:
+            tipo = dados.get("tipo")
+            self._validar_matriz(dados, tipo)
+        if tipo == TipoEmpresa.FILIAL:
             if not dados.get("descricao_filial"):
                 self.add_error(
                     "descricao_filial",
@@ -275,7 +330,20 @@ class EmpresaForm(FormularioComMunicipio):
                 )
         else:
             dados["descricao_filial"] = ""
+        if dados.get("data_encerramento") is None:
+            dados["motivo_encerramento"] = ""
+        elif not dados.get("motivo_encerramento"):
+            self.add_error("motivo_encerramento", "Informe o motivo do encerramento.")
         return dados
+
+    def _validar_matriz(self, dados: dict, tipo: str | None) -> None:
+        if tipo == TipoEmpresa.FILIAL:
+            if not dados.get("matriz"):
+                self.add_error("matriz", "Selecione a matriz da filial.")
+            if self.instance.pk and self.instance.filiais.exists():
+                self.add_error("tipo", "A matriz tem filiais e não pode virar filial.")
+        else:
+            dados["matriz"] = None
 
 
 class UPCsPorEmpresaWidget(forms.SelectMultiple):
@@ -289,6 +357,7 @@ class UPCsPorEmpresaWidget(forms.SelectMultiple):
 
 
 class UsuarioForm(FormularioEmSecoes):
+    recebe_usuario = True
     secoes_campos = (
         (
             "Dados de acesso",
@@ -298,18 +367,18 @@ class UsuarioForm(FormularioEmSecoes):
         (
             "Dados do usuário",
             (
-                "Administradores acessam todas as empresas. Gestores ficam "
-                "associados a uma empresa/unidade."
+                "O administrador acessa a matriz e todas as filiais dela. Gestores "
+                "e operadores acessam só as empresas liberadas abaixo."
             ),
-            ("nome_completo", "email"),
+            ("nome_completo", "email", "matriz"),
         ),
         (
-            "Vínculo do gestor",
+            "Acesso do gestor e do operador",
             (
-                "Escolha as UPCs que ele acessa (segure Ctrl para marcar várias); "
-                "sem seleção, acessa todas as UPCs da empresa."
+                "Marque as empresas e as UPCs (segure Ctrl para marcar várias); "
+                "sem UPC marcada, acessa todas as UPCs das empresas liberadas."
             ),
-            ("empresa", "upcs"),
+            ("empresas", "upcs"),
         ),
     )
 
@@ -343,14 +412,16 @@ class UsuarioForm(FormularioEmSecoes):
             "tipo_usuario",
             "nome_completo",
             "email",
-            "empresa",
+            "matriz",
+            "empresas",
             "upcs",
             "is_active",
         ]
         labels = {
             "username": "Usuário de acesso",
             "nome_completo": "Nome completo",
-            "empresa": "Empresa/unidade",
+            "matriz": "Matriz (conta do cliente)",
+            "empresas": "Empresas com acesso",
             "is_active": "Ativo no sistema",
         }
         help_texts = {
@@ -367,19 +438,47 @@ class UsuarioForm(FormularioEmSecoes):
             validate_password(senha, self.instance)
         return senha
 
+    def __init__(self, *args, usuario=None, **kwargs) -> None:  # noqa: ANN002, ANN003
+        super().__init__(*args, **kwargs)
+        self.usuario = usuario
+        matriz = self.fields["matriz"]
+        matriz.queryset = Empresa.objects.filter(tipo=TipoEmpresa.MATRIZ)
+        matriz.label_from_instance = lambda e: e.identificacao
+        self.fields["empresas"].label_from_instance = lambda e: e.identificacao
+        if usuario is not None and not usuario.is_superuser:
+            # O administrador da matriz cadastra usuários só da própria conta.
+            del self.fields["matriz"]
+            conta = Empresa.objects.da_conta(usuario.matriz_id)
+            self.fields["empresas"].queryset = conta
+            self.fields["upcs"].queryset = UPC.objects.filter(
+                empresa__in=conta
+            ).select_related("empresa")
+
     def clean(self):
         dados = super().clean()
+        if "matriz" in self.fields:
+            matriz = dados.get("matriz")
+        else:
+            matriz = self.usuario.matriz if self.usuario else None
+            self.instance.matriz = matriz
+        if matriz is None and not self.instance.is_superuser:
+            self.add_error(
+                "matriz" if "matriz" in self.fields else None,
+                "Selecione a matriz do usuário.",
+            )
         if dados.get("tipo_usuario") == TipoUsuario.ADMINISTRADOR:
-            dados["empresa"] = None
+            dados["empresas"] = Empresa.objects.none()
             dados["upcs"] = UPC.objects.none()
-            self.errors.pop("empresa", None)
             return dados
-        empresa = dados.get("empresa")
-        if empresa is None:
-            self.add_error("empresa", "Selecione a empresa do gestor.")
-        upcs = dados.get("upcs")
-        if empresa and upcs and any(u.empresa_id != empresa.pk for u in upcs):
-            self.add_error("upcs", "Selecione apenas UPCs da empresa do gestor.")
+        empresas = dados.get("empresas") or []
+        if not empresas:
+            self.add_error("empresas", "Marque pelo menos uma empresa.")
+        if matriz and any(e.matriz_da_conta_id != matriz.pk for e in empresas):
+            self.add_error("empresas", "Marque apenas empresas da matriz do usuário.")
+        codigos = {empresa.pk for empresa in empresas}
+        upcs = dados.get("upcs") or []
+        if any(upc.empresa_id not in codigos for upc in upcs):
+            self.add_error("upcs", "Marque apenas UPCs das empresas liberadas.")
         return dados
 
     def save(self, commit=True):  # noqa: FBT002
@@ -388,9 +487,9 @@ class UsuarioForm(FormularioEmSecoes):
         if senha:
             usuario.set_password(senha)
             usuario.primeiro_acesso = True
-        administrador = usuario.tipo_usuario == TipoUsuario.ADMINISTRADOR
-        usuario.is_staff = administrador
-        usuario.is_superuser = administrador
+        # O perfil de administrador vale só dentro da matriz; o superusuário
+        # (dono do sistema) é criado pelo comando createsuperuser.
+        usuario.is_staff = usuario.is_superuser
         if commit:
             usuario.save()
             self.save_m2m()
@@ -881,17 +980,9 @@ class UPCForm(FormularioDaEmpresa, FormularioEmSecoes):
             ("utm_leste", "utm_norte", "utm_fuso"),
         ),
         (
-            "Fornos e capacidade",
-            "O volume por ciclo e por mês é calculado automaticamente.",
-            (
-                "numero_fornos",
-                "tipo_forno",
-                "diametro_forno_m",
-                "altura_total_forno_m",
-                "altura_cilindro_m",
-                "volume_forno_mdc",
-                "ciclo_producao_dias",
-            ),
+            "Produção declarada",
+            "O número de fornos e o volume por ciclo e por mês vêm do cadastro.",
+            ("ciclo_producao_dias",),
         ),
     )
 
@@ -906,12 +997,6 @@ class UPCForm(FormularioDaEmpresa, FormularioEmSecoes):
             "utm_leste",
             "utm_norte",
             "utm_fuso",
-            "numero_fornos",
-            "tipo_forno",
-            "diametro_forno_m",
-            "altura_total_forno_m",
-            "altura_cilindro_m",
-            "volume_forno_mdc",
             "ciclo_producao_dias",
         ]
         labels = {
@@ -921,12 +1006,6 @@ class UPCForm(FormularioDaEmpresa, FormularioEmSecoes):
             "utm_leste": "UTM leste (X)",
             "utm_norte": "UTM norte (Y)",
             "utm_fuso": "Fuso UTM",
-            "numero_fornos": "Número de fornos",
-            "tipo_forno": "Tipo de forno",
-            "diametro_forno_m": "Diâmetro (m)",
-            "altura_total_forno_m": "Altura total (m)",
-            "altura_cilindro_m": "Altura do cilindro (m)",
-            "volume_forno_mdc": "Volume por forno (MDC)",
             "ciclo_producao_dias": "Ciclo de produção (dias)",
         }
 
@@ -1443,7 +1522,7 @@ class ExpedicaoGestorForm(ExpedicaoForm):
 
 
 class TransporteLenhaForm(FormularioDaEmpresa, FormularioEmSecoes):
-    campos_da_empresa = ("autorizacao", "talhao", "upc", "fornecedor")
+    campos_da_empresa = ("autorizacao", "talhao", "upc", "box_lenha", "fornecedor")
     secoes_campos = (
         (
             "Carga",
@@ -1459,8 +1538,8 @@ class TransporteLenhaForm(FormularioDaEmpresa, FormularioEmSecoes):
         ),
         (
             "Destino",
-            "UPC própria ou venda a terceiros.",
-            ("destino", "upc", "comprador"),
+            "UPC própria ou venda a terceiros. O box é opcional.",
+            ("destino", "upc", "box_lenha", "comprador"),
         ),
         (
             "Transporte",
@@ -1485,6 +1564,7 @@ class TransporteLenhaForm(FormularioDaEmpresa, FormularioEmSecoes):
             "numero_documento",
             "destino",
             "upc",
+            "box_lenha",
             "comprador",
             "tipo_transporte",
             "fornecedor",
@@ -1502,6 +1582,7 @@ class TransporteLenhaForm(FormularioDaEmpresa, FormularioEmSecoes):
             "volume_mst": "Volume (MST)",
             "numero_documento": "Nota, guia ou ticket",
             "upc": "UPC de destino",
+            "box_lenha": "Box da praça",
             "tipo_transporte": "Tipo de transporte",
             "fornecedor": "Transportador",
             "placa_veiculo": "Placa do veículo",
@@ -1516,11 +1597,15 @@ class TransporteLenhaForm(FormularioDaEmpresa, FormularioEmSecoes):
         if dados.get("destino") == DestinoLenha.UPC:
             if not dados.get("upc"):
                 self.add_error("upc", "Informe a UPC de destino.")
+            box, upc = dados.get("box_lenha"), dados.get("upc")
+            if box and upc and box.upc_id != upc.pk:
+                self.add_error("box_lenha", "O box é de outra UPC.")
             dados["comprador"] = ""
         elif dados.get("destino") == DestinoLenha.VENDA:
             if not dados.get("comprador"):
                 self.add_error("comprador", "Informe o comprador.")
             dados["upc"] = None
+            dados["box_lenha"] = None
         if dados.get("tipo_transporte") == TipoTransporte.TERCEIRIZADO:
             if not dados.get("fornecedor"):
                 self.add_error("fornecedor", "Obrigatório em transporte terceirizado.")
@@ -1644,6 +1729,14 @@ class ColheitaGestorForm(ColheitaForm):
 
 
 class ParametrosForm(FormularioEmSecoes):
+    recebe_usuario = True
+
+    def __init__(self, *args, usuario=None, **kwargs) -> None:  # noqa: ANN002, ANN003
+        super().__init__(*args, **kwargs)
+        if usuario is not None:
+            campo = self.fields["empresa"]
+            campo.queryset = usuario.empresas_permitidas()
+
     secoes_campos = (
         (
             "Unidade e idioma",
@@ -1902,67 +1995,552 @@ class ClienteGestorForm(ClienteForm):
         fields = [campo for campo in ClienteForm.Meta.fields if campo != "empresa"]
 
 
-class ProducaoCarvaoForm(FormularioDaEmpresa, FormularioEmSecoes):
-    campos_da_empresa = ("upc", "autorizacao")
+def _sem_empresa(campos: list[str]) -> list[str]:
+    return [campo for campo in campos if campo != "empresa"]
+
+
+class ParametroEmpresaForm(FormularioEmSecoes):
     secoes_campos = (
         (
-            "Produção",
-            "Carvão produzido na UPC (descarga dos fornos ou fim do ciclo).",
+            "Conversão da lenha",
+            "Toda lenha é medida em MST; o sistema converte para m³ com este fator.",
+            ("empresa", "fator_mst_por_m3"),
+        ),
+        (
+            "Rendimento ideal",
             (
-                "empresa",
-                "upc",
-                "autorizacao",
-                "data_producao",
-                "numero_fornos",
-                "observacao",
+                "Referência para o alerta de cada ciclo de forno. Sem tolerância "
+                "informada, o sistema alerta a partir de 30% de diferença."
+            ),
+            (
+                "fator_m3_por_mdc_ideal",
+                "fator_mst_por_mdc_ideal",
+                "tolerancia_fator_pct",
             ),
         ),
         (
-            "Volumes",
-            "O rendimento é calculado (referência do DCF: 0,77 MDC por m³).",
-            ("volume_mdc", "volume_lenha_m3"),
+            "Estoque no talhão",
+            "Define qual posição do talhão gera alerta.",
+            ("controle_estoque_talhao", "observacao"),
         ),
     )
 
     class Meta:
-        model = ProducaoCarvao
+        model = ParametroEmpresa
+        fields = [
+            "empresa",
+            "fator_mst_por_m3",
+            "fator_m3_por_mdc_ideal",
+            "fator_mst_por_mdc_ideal",
+            "tolerancia_fator_pct",
+            "controle_estoque_talhao",
+            "observacao",
+        ]
+        labels = {
+            "empresa": "Empresa/unidade",
+            "fator_mst_por_m3": "MST por m³",
+            "fator_m3_por_mdc_ideal": "m³ de lenha por MDC (ideal)",
+            "fator_mst_por_mdc_ideal": "MST de lenha por MDC (ideal)",
+            "tolerancia_fator_pct": "Tolerância do alerta (%)",
+            "controle_estoque_talhao": "Controle do estoque no talhão",
+            "observacao": "Observação",
+        }
+
+    def __init__(self, *args, empresa=None, **kwargs) -> None:  # noqa: ANN002, ANN003
+        super().__init__(*args, **kwargs)
+        self.empresa_fixa = empresa
+
+    def clean(self):
+        dados = super().clean()
+        for campo in (
+            "fator_mst_por_m3",
+            "fator_m3_por_mdc_ideal",
+            "fator_mst_por_mdc_ideal",
+        ):
+            valor = dados.get(campo)
+            if valor is not None and valor <= 0:
+                self.add_error(campo, "Informe um fator maior que zero.")
+        tolerancia = dados.get("tolerancia_fator_pct")
+        if tolerancia is not None and not 0 <= tolerancia <= 100:
+            self.add_error("tolerancia_fator_pct", "Informe entre 0 e 100%.")
+        if self.empresa_fixa is not None:
+            repetido = (
+                ParametroEmpresa.objects.filter(empresa=self.empresa_fixa)
+                .exclude(pk=self.instance.pk)
+                .exists()
+            )
+            if repetido:
+                self.add_error(
+                    None,
+                    "Esta empresa já tem parâmetros de produção. Edite o "
+                    "registro existente.",
+                )
+        return dados
+
+
+class ParametroEmpresaGestorForm(ParametroEmpresaForm):
+    class Meta(ParametroEmpresaForm.Meta):
+        fields = _sem_empresa(ParametroEmpresaForm.Meta.fields)
+
+
+class TipoFornoForm(FormularioDaEmpresa, FormularioEmSecoes):
+    campos_unicos = ("nome",)
+    secoes_campos = (
+        (
+            "Modelo",
+            "DCF itens 7.3 e 7.5.",
+            ("empresa", "nome", "formato", "capacidade_mdc", "capacidade_lenha_mst"),
+        ),
+        (
+            "Mecanização",
+            "Semimecanizado: só o enchimento ou só a descarga é mecanizado.",
+            ("nivel_mecanizacao", "enchimento_mecanizado", "descarga_mecanizada"),
+        ),
+        (
+            "Dimensões (DCF 7.4)",
+            "Circular: diâmetro. Retangular: comprimento e largura.",
+            (
+                "diametro_m",
+                "comprimento_m",
+                "largura_m",
+                "altura_total_m",
+                "altura_cilindro_m",
+                "observacao",
+            ),
+        ),
+    )
+
+    class Meta:
+        model = TipoForno
+        fields = [
+            "empresa",
+            "nome",
+            "formato",
+            "capacidade_mdc",
+            "capacidade_lenha_mst",
+            "nivel_mecanizacao",
+            "enchimento_mecanizado",
+            "descarga_mecanizada",
+            "diametro_m",
+            "comprimento_m",
+            "largura_m",
+            "altura_total_m",
+            "altura_cilindro_m",
+            "observacao",
+        ]
+        labels = {
+            "empresa": "Empresa/unidade",
+            "capacidade_mdc": "Produção por ciclo (MDC)",
+            "capacidade_lenha_mst": "Lenha por enchimento (MST)",
+            "nivel_mecanizacao": "Nível de mecanização",
+            "diametro_m": "Diâmetro (m)",
+            "comprimento_m": "Comprimento (m)",
+            "largura_m": "Largura (m)",
+            "altura_total_m": "Altura total (m)",
+            "altura_cilindro_m": "Altura do cilindro (m)",
+            "observacao": "Observação",
+        }
+
+    def clean(self):
+        dados = super().clean()
+        if dados.get("formato") == FormatoForno.CIRCULAR:
+            if not dados.get("diametro_m"):
+                self.add_error("diametro_m", "Informe o diâmetro do forno circular.")
+            dados["comprimento_m"] = dados["largura_m"] = None
+        elif dados.get("formato") == FormatoForno.RETANGULAR:
+            for campo in ("comprimento_m", "largura_m"):
+                if not dados.get(campo):
+                    self.add_error(campo, "Obrigatório no forno retangular.")
+            dados["diametro_m"] = None
+        nivel = dados.get("nivel_mecanizacao")
+        if nivel == NivelMecanizacao.MANUAL:
+            dados["enchimento_mecanizado"] = dados["descarga_mecanizada"] = False
+        elif nivel == NivelMecanizacao.MECANIZADO:
+            dados["enchimento_mecanizado"] = dados["descarga_mecanizada"] = True
+        elif nivel == NivelMecanizacao.SEMIMECANIZADO and (
+            dados.get("enchimento_mecanizado") == dados.get("descarga_mecanizada")
+        ):
+            self.add_error(
+                "nivel_mecanizacao",
+                "No semimecanizado, só o enchimento ou só a descarga é mecanizado.",
+            )
+        capacidade = dados.get("capacidade_mdc")
+        if capacidade is not None and capacidade <= 0:
+            self.add_error("capacidade_mdc", "Informe uma capacidade maior que zero.")
+        return dados
+
+
+class TipoFornoGestorForm(TipoFornoForm):
+    class Meta(TipoFornoForm.Meta):
+        fields = _sem_empresa(TipoFornoForm.Meta.fields)
+
+
+LIMITE_FORNOS_EM_LOTE = 500
+
+
+def sequencia_de_numeros(primeiro: str, quantidade: int) -> list[str]:
+    """F01 e 3 viram F01, F02 e F03, mantendo o prefixo e os zeros."""
+    inicio = len(primeiro.rstrip("0123456789"))
+    prefixo, digitos = primeiro[:inicio], primeiro[inicio:]
+    if not digitos:
+        raise ValueError
+    base = int(digitos)
+    largura = max(len(digitos), len(str(base + quantidade - 1)))
+    return [f"{prefixo}{base + i:0{largura}d}" for i in range(quantidade)]
+
+
+class FornoForm(FormularioDaEmpresa, FormularioEmSecoes):
+    campos_da_empresa = ("upc", "tipo_forno")
+    quantidade = forms.IntegerField(
+        label="Quantidade de fornos",
+        min_value=1,
+        max_value=LIMITE_FORNOS_EM_LOTE,
+        initial=1,
+        required=False,
+        help_text="Para criar vários de uma vez: informe o primeiro número "
+        "(ex.: F01) e a quantidade.",
+    )
+    secoes_campos = (
+        (
+            "Forno",
+            "Cada forno é cadastrado com seu número na UPC.",
+            ("empresa", "upc", "tipo_forno", "numero", "quantidade", "situacao"),
+        ),
+        (
+            "Detalhes",
+            "Capacidade só se for diferente da do tipo de forno.",
+            ("data_instalacao", "capacidade_mdc", "observacao"),
+        ),
+    )
+
+    class Meta:
+        model = Forno
         fields = [
             "empresa",
             "upc",
-            "autorizacao",
-            "data_producao",
-            "numero_fornos",
-            "volume_mdc",
-            "volume_lenha_m3",
+            "tipo_forno",
+            "numero",
+            "situacao",
+            "data_instalacao",
+            "capacidade_mdc",
             "observacao",
         ]
         labels = {
             "empresa": "Empresa/unidade",
             "upc": "UPC",
-            "autorizacao": "Autorização da lenha",
-            "data_producao": "Data da produção",
-            "numero_fornos": "Fornos descarregados",
+            "tipo_forno": "Tipo de forno",
+            "numero": "Número do forno",
+            "situacao": "Situação",
+            "data_instalacao": "Data de instalação",
+            "capacidade_mdc": "Capacidade própria (MDC)",
             "observacao": "Observação",
         }
-        widgets = {"data_producao": forms.DateInput(attrs={"type": "date"})}
+        widgets = {"data_instalacao": forms.DateInput(attrs={"type": "date"})}
+
+    def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        super().__init__(*args, **kwargs)
+        self.numeros_extras: list[str] = []
+        if self.instance.pk:
+            del self.fields["quantidade"]
 
     def clean(self):
         dados = super().clean()
-        autorizacao, upc = dados.get("autorizacao"), dados.get("upc")
-        if autorizacao and upc and not autorizacao.upcs.filter(pk=upc.pk).exists():
-            self.add_error("autorizacao", "A autorização é de outra UPC.")
-        for campo in ("volume_mdc", "volume_lenha_m3"):
-            valor = dados.get(campo)
-            if valor is not None and valor <= 0:
-                self.add_error(campo, "Informe um volume maior que zero.")
+        upc, numero = dados.get("upc"), dados.get("numero")
+        quantidade = dados.get("quantidade") or 1
+        if not upc or not numero:
+            return dados
+        numeros = [numero]
+        if quantidade > 1:
+            try:
+                numeros = sequencia_de_numeros(numero, quantidade)
+            except ValueError:
+                self.add_error(
+                    "numero", "Para criar em lote, o número deve terminar em dígitos."
+                )
+                return dados
+        existentes = list(
+            Forno.objects.filter(upc=upc, numero__in=numeros)
+            .exclude(pk=self.instance.pk)
+            .values_list("numero", flat=True)
+        )
+        if existentes:
+            self.add_error(
+                "numero", f"Já existem na UPC: {', '.join(sorted(existentes))}."
+            )
+        self.numeros_extras = numeros[1:]
+        return dados
+
+    def salvar_extras(self, registro: Forno) -> None:
+        Forno.objects.bulk_create(
+            Forno(
+                empresa_id=registro.empresa_id,
+                upc_id=registro.upc_id,
+                tipo_forno_id=registro.tipo_forno_id,
+                numero=numero,
+                situacao=registro.situacao,
+                data_instalacao=registro.data_instalacao,
+                capacidade_mdc=registro.capacidade_mdc,
+                observacao=registro.observacao,
+                usuario_inclusao=registro.usuario_inclusao,
+                usuario_alteracao=registro.usuario_alteracao,
+            )
+            for numero in self.numeros_extras
+        )
+
+
+class FornoGestorForm(FornoForm):
+    class Meta(FornoForm.Meta):
+        fields = _sem_empresa(FornoForm.Meta.fields)
+
+
+class BoxLenhaForm(FormularioDaEmpresa, FormularioEmSecoes):
+    campos_da_empresa = ("upc",)
+    secoes_campos = (
+        (
+            "Box",
+            "Box da praça de carbonização onde a lenha do baldeio é depositada.",
+            (
+                "empresa",
+                "upc",
+                "numero",
+                "descricao",
+                "capacidade_mst",
+                "situacao",
+                "observacao",
+            ),
+        ),
+    )
+
+    class Meta:
+        model = BoxLenha
+        fields = [
+            "empresa",
+            "upc",
+            "numero",
+            "descricao",
+            "capacidade_mst",
+            "situacao",
+            "observacao",
+        ]
+        labels = {
+            "empresa": "Empresa/unidade",
+            "upc": "UPC",
+            "numero": "Número do box",
+            "descricao": "Descrição ou localização",
+            "capacidade_mst": "Capacidade (MST)",
+            "situacao": "Situação",
+            "observacao": "Observação",
+        }
+
+    def clean(self):
+        dados = super().clean()
+        upc, numero = dados.get("upc"), dados.get("numero")
+        if (
+            upc
+            and numero
+            and BoxLenha.objects.filter(upc=upc, numero=numero)
+            .exclude(pk=self.instance.pk)
+            .exists()
+        ):
+            self.add_error("numero", "Já existe um box com este número na UPC.")
         return dados
 
 
-class ProducaoCarvaoGestorForm(ProducaoCarvaoForm):
-    class Meta(ProducaoCarvaoForm.Meta):
+class BoxLenhaGestorForm(BoxLenhaForm):
+    class Meta(BoxLenhaForm.Meta):
+        fields = _sem_empresa(BoxLenhaForm.Meta.fields)
+
+
+ENTRADA_DATA_HORA = forms.DateTimeInput(
+    attrs={"type": "datetime-local"}, format="%Y-%m-%dT%H:%M"
+)
+ETAPAS_DO_CICLO = (
+    ("data_inicio_enchimento", "início do enchimento"),
+    ("data_acendimento", "acendimento"),
+    ("data_fim_carbonizacao", "fim da carbonização"),
+    ("data_descarga", "descarga"),
+)
+
+
+class CicloFornoForm(FormularioDaEmpresa, FormularioEmSecoes):
+    campos_da_empresa = ("forno", "box_lenha", "fornecedor")
+    cancelado = forms.BooleanField(label="Ciclo cancelado", required=False)
+    secoes_campos = (
+        (
+            "Forno e etapas",
+            (
+                "O status segue as datas preenchidas: enchimento, carbonização, "
+                "resfriamento e descarga."
+            ),
+            (
+                "empresa",
+                "forno",
+                "numero_ciclo",
+                "data_inicio_enchimento",
+                "data_acendimento",
+                "data_fim_carbonizacao",
+                "data_descarga",
+                "cancelado",
+            ),
+        ),
+        (
+            "Lenha e carvão",
+            "Lenha em MST; o m³ e os fatores de conversão são calculados.",
+            (
+                "box_lenha",
+                "volume_lenha_enchimento",
+                "fator_conversao",
+                "volume_mdc",
+            ),
+        ),
+        (
+            "Execução",
+            "Terceirizada: o empreiteiro recebe por MDC produzido.",
+            ("tipo_execucao", "fornecedor", "valor_mdc"),
+        ),
+        (
+            "Fatores do rendimento",
+            "Ajudam a explicar a variação do fator de conversão.",
+            (
+                "condicao_tempo",
+                "dias_secagem_lenha",
+                "responsavel_enchimento",
+                "responsavel_descarga",
+                "observacao",
+            ),
+        ),
+    )
+
+    class Meta:
+        model = CicloForno
         fields = [
-            campo for campo in ProducaoCarvaoForm.Meta.fields if campo != "empresa"
+            "empresa",
+            "forno",
+            "numero_ciclo",
+            "data_inicio_enchimento",
+            "data_acendimento",
+            "data_fim_carbonizacao",
+            "data_descarga",
+            "box_lenha",
+            "volume_lenha_enchimento",
+            "fator_conversao",
+            "volume_mdc",
+            "tipo_execucao",
+            "fornecedor",
+            "valor_mdc",
+            "condicao_tempo",
+            "dias_secagem_lenha",
+            "responsavel_enchimento",
+            "responsavel_descarga",
+            "observacao",
         ]
+        labels = {
+            "empresa": "Empresa/unidade",
+            "numero_ciclo": "Número do ciclo",
+            "data_inicio_enchimento": "Início do enchimento",
+            "data_acendimento": "Acendimento",
+            "data_fim_carbonizacao": "Fim da carbonização",
+            "data_descarga": "Descarga",
+            "box_lenha": "Box de origem da lenha",
+            "fator_conversao": "Fator (MST por m³)",
+            "tipo_execucao": "Execução",
+            "fornecedor": "Empreiteiro",
+            "valor_mdc": "Valor por MDC",
+            "condicao_tempo": "Condição do tempo",
+            "dias_secagem_lenha": "Dias de secagem da lenha",
+            "responsavel_enchimento": "Quem mediu o enchimento",
+            "responsavel_descarga": "Quem mediu a descarga",
+            "observacao": "Observação",
+        }
+        help_texts = {
+            "numero_ciclo": "Em branco: o próximo número do forno.",
+            "volume_mdc": "Medido na descarga do forno.",
+        }
+        widgets = {nome: ENTRADA_DATA_HORA for nome, _ in ETAPAS_DO_CICLO}
+
+    def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        super().__init__(*args, **kwargs)
+        self.fields["fornecedor"].queryset = self.fields[
+            "fornecedor"
+        ].queryset.filter(fornece_servico=True)
+        self.fields["cancelado"].initial = (
+            self.instance.status == StatusCiclo.CANCELADO
+        )
+        if not self.instance.pk:
+            parametro = ParametroEmpresa.da_empresa(
+                self.empresa_fixa.pk if self.empresa_fixa else None
+            )
+            self.fields["fator_conversao"].initial = parametro.fator_mst_por_m3
+        self.fields["fator_conversao"].required = True
+
+    def clean(self):
+        dados = super().clean()
+        self._validar_datas(dados)
+        self._validar_volumes(dados)
+        forno, box = dados.get("forno"), dados.get("box_lenha")
+        if box and forno and box.upc_id != forno.upc_id:
+            self.add_error("box_lenha", "O box é de outra UPC.")
+        if dados.get("tipo_execucao") == TipoExecucao.TERCEIRIZADA:
+            if not dados.get("fornecedor"):
+                self.add_error("fornecedor", "Obrigatório na produção terceirizada.")
+        else:
+            dados["fornecedor"] = None
+            dados["valor_mdc"] = None
+        self.instance.status = (
+            StatusCiclo.CANCELADO
+            if dados.get("cancelado")
+            else StatusCiclo.ENCHIMENTO
+        )
+        if not dados.get("numero_ciclo") and self.instance.pk and (
+            forno is None or forno.pk == self.instance.forno_id
+        ):
+            dados["numero_ciclo"] = self.instance.numero_ciclo
+        if forno:
+            self._validar_forno(dados, forno)
+        return dados
+
+    def _validar_datas(self, dados: dict) -> None:
+        """Cada etapa exige a anterior e não pode ser antes dela."""
+        for (nome_anterior, rotulo_anterior), (nome, _) in pairwise(ETAPAS_DO_CICLO):
+            valor, valor_anterior = dados.get(nome), dados.get(nome_anterior)
+            if valor is None or nome_anterior in self.errors:
+                continue
+            if valor_anterior is None:
+                self.add_error(nome, f"Preencha o {rotulo_anterior} primeiro.")
+            elif valor < valor_anterior:
+                self.add_error(nome, f"Não pode ser antes do {rotulo_anterior}.")
+
+    def _validar_volumes(self, dados: dict) -> None:
+        for campo in ("volume_lenha_enchimento", "fator_conversao", "volume_mdc"):
+            valor = dados.get(campo)
+            if valor is not None and valor <= 0:
+                self.add_error(campo, "Informe um valor maior que zero.")
+        if dados.get("data_descarga") and dados.get("volume_mdc") is None:
+            self.add_error("volume_mdc", "Informe o carvão medido na descarga.")
+        if dados.get("volume_mdc") is not None and not dados.get("data_descarga"):
+            self.add_error("data_descarga", "Informe a data da descarga do carvão.")
+
+    def _validar_forno(self, dados: dict, forno: Forno) -> None:
+        mudou_forno = self.instance.forno_id != forno.pk
+        if mudou_forno and forno.situacao == SituacaoForno.DESATIVADO:
+            self.add_error("forno", "O forno está desativado.")
+        outros = CicloForno.objects.filter(forno=forno).exclude(pk=self.instance.pk)
+        numero = dados.get("numero_ciclo")
+        if numero and outros.filter(numero_ciclo=numero).exists():
+            self.add_error("numero_ciclo", "O forno já tem um ciclo com este número.")
+        self.instance.data_descarga = dados.get("data_descarga")
+        self.instance.data_fim_carbonizacao = dados.get("data_fim_carbonizacao")
+        self.instance.data_acendimento = dados.get("data_acendimento")
+        ativo = self.instance.status_pelas_datas() in STATUS_CICLO_ATIVO
+        if ativo and outros.filter(status__in=STATUS_CICLO_ATIVO).exists():
+            self.add_error(
+                "forno", "Este forno já tem um ciclo em andamento. Descarregue-o antes."
+            )
+
+
+class CicloFornoGestorForm(CicloFornoForm):
+    class Meta(CicloFornoForm.Meta):
+        fields = _sem_empresa(CicloFornoForm.Meta.fields)
 
 
 class LancamentoCustoForm(FormularioDaEmpresa, FormularioEmSecoes):

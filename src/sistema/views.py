@@ -9,6 +9,7 @@ from django.contrib.auth.decorators import login_required
 from django.contrib.auth.views import LoginView, PasswordChangeView
 from django.core.exceptions import PermissionDenied
 from django.core.paginator import Paginator
+from django.db import transaction
 from django.db.models import Model, ProtectedError, Q
 from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -25,10 +26,14 @@ from sistema.contexto import (
 from sistema.forms import (
     AutorizacaoAmbientalForm,
     AutorizacaoAmbientalGestorForm,
+    BoxLenhaForm,
+    BoxLenhaGestorForm,
     CategoriaCustoForm,
     CategoriaCustoGestorForm,
     CentroCustoForm,
     CentroCustoGestorForm,
+    CicloFornoForm,
+    CicloFornoGestorForm,
     ClienteForm,
     ClienteGestorForm,
     ColheitaForm,
@@ -44,6 +49,8 @@ from sistema.forms import (
     FazendaGestorForm,
     FornecedorForm,
     FornecedorGestorForm,
+    FornoForm,
+    FornoGestorForm,
     InventarioFlorestalForm,
     InventarioFlorestalGestorForm,
     InventarioTalhaoForm,
@@ -52,15 +59,17 @@ from sistema.forms import (
     LancamentoCustoGestorForm,
     LancamentoCustoRateioForm,
     LancamentoCustoRateioGestorForm,
+    ParametroEmpresaForm,
+    ParametroEmpresaGestorForm,
     ParametrosForm,
     PlantioForm,
     PlantioGestorForm,
-    ProducaoCarvaoForm,
-    ProducaoCarvaoGestorForm,
     ProprietarioForm,
     ProprietarioGestorForm,
     TalhaoForm,
     TalhaoGestorForm,
+    TipoFornoForm,
+    TipoFornoGestorForm,
     TransporteLenhaForm,
     TransporteLenhaGestorForm,
     UPCForm,
@@ -70,8 +79,10 @@ from sistema.forms import (
 from sistema.models import (
     UPC,
     AutorizacaoAmbiental,
+    BoxLenha,
     CategoriaCusto,
     CentroCusto,
+    CicloForno,
     Cliente,
     Colheita,
     Empresa,
@@ -80,17 +91,19 @@ from sistema.models import (
     Expedicao,
     Fazenda,
     Fornecedor,
+    Forno,
     InventarioFlorestal,
     InventarioTalhao,
     LancamentoCusto,
     LancamentoCustoRateio,
     Municipio,
+    ParametroEmpresa,
     Parametros,
     Plantio,
-    ProducaoCarvao,
     Proprietario,
     RegistroAuditavel,
     Talhao,
+    TipoForno,
     TipoUsuario,
     TransporteLenha,
     Usuario,
@@ -119,14 +132,22 @@ MODELOS_POR_EMPRESA = (
     CategoriaCusto,
     Equipamento,
     Cliente,
-    ProducaoCarvao,
+    ParametroEmpresa,
+    TipoForno,
+    Forno,
+    BoxLenha,
+    CicloForno,
     LancamentoCusto,
     LancamentoCustoRateio,
 )
 FORMULARIOS_DO_GESTOR = {
     LancamentoCusto: LancamentoCustoGestorForm,
     LancamentoCustoRateio: LancamentoCustoRateioGestorForm,
-    ProducaoCarvao: ProducaoCarvaoGestorForm,
+    ParametroEmpresa: ParametroEmpresaGestorForm,
+    TipoForno: TipoFornoGestorForm,
+    Forno: FornoGestorForm,
+    BoxLenha: BoxLenhaGestorForm,
+    CicloForno: CicloFornoGestorForm,
     CentroCusto: CentroCustoGestorForm,
     CategoriaCusto: CategoriaCustoGestorForm,
     Equipamento: EquipamentoGestorForm,
@@ -159,6 +180,9 @@ ATALHOS_DE_CADASTRO = {
     "centro_custo": "centros-custo",
     "lancamento": "lancamentos-custo",
     "categoria_pai": "categorias-custo",
+    "tipo_forno": "tipos-forno",
+    "forno": "fornos",
+    "box_lenha": "boxes-lenha",
 }
 FILTROS_POR_UPC = {
     InventarioFlorestal: lambda upcs: Q(fazenda__upcs__in=upcs),
@@ -167,7 +191,9 @@ FILTROS_POR_UPC = {
     Expedicao: lambda upcs: Q(autorizacao__upcs__in=upcs),
     TransporteLenha: lambda upcs: Q(upc__in=upcs) | Q(autorizacao__upcs__in=upcs),
     Colheita: lambda upcs: Q(inventario__fazenda__upcs__in=upcs),
-    ProducaoCarvao: lambda upcs: Q(upc__in=upcs),
+    Forno: lambda upcs: Q(upc__in=upcs),
+    BoxLenha: lambda upcs: Q(upc__in=upcs),
+    CicloForno: lambda upcs: Q(forno__upc__in=upcs),
 }
 
 
@@ -215,20 +241,88 @@ RECURSOS: dict[str, dict[str, Any]] = {
         ],
         "somente_admin": False,
     },
-    "producoes-carvao": {
-        "titulo": "Produção de carvão",
-        "modelo": ProducaoCarvao,
-        "formulario": ProducaoCarvaoForm,
+    "parametros-producao": {
+        "titulo": "Parâmetros de produção",
+        "modelo": ParametroEmpresa,
+        "formulario": ParametroEmpresaForm,
         "colunas": [
-            ("Data", "data_producao"),
-            ("UPC", "upc"),
-            ("MDC", "volume_mdc"),
-            ("Lenha (m³)", "volume_lenha_m3"),
-            ("Rendimento", "rendimento_mdc_m3"),
-            ("Alerta", "alerta_rendimento"),
+            ("MST por m³", "fator_mst_por_m3"),
+            ("m³ por MDC (ideal)", "fator_m3_por_mdc_ideal"),
+            ("MST por MDC (ideal)", "fator_mst_por_mdc_ideal"),
+            ("Tolerância (%)", "tolerancia_efetiva_pct"),
+            ("Estoque no talhão", "get_controle_estoque_talhao_display"),
             ("Empresa", "empresa"),
         ],
-        "busca": ["upc__nome", "autorizacao__numero", "empresa__razao_social"],
+        "busca": ["empresa__razao_social"],
+        "somente_admin": False,
+    },
+    "tipos-forno": {
+        "titulo": "Tipos de forno",
+        "modelo": TipoForno,
+        "formulario": TipoFornoForm,
+        "colunas": [
+            ("Nome", "nome"),
+            ("Formato", "get_formato_display"),
+            ("Mecanização", "get_nivel_mecanizacao_display"),
+            ("MDC por ciclo", "capacidade_mdc"),
+            ("Empresa", "empresa"),
+        ],
+        "busca": ["nome", "empresa__razao_social"],
+        "somente_admin": False,
+    },
+    "fornos": {
+        "titulo": "Fornos",
+        "modelo": Forno,
+        "formulario": FornoForm,
+        "colunas": [
+            ("UPC", "upc"),
+            ("Forno", "numero"),
+            ("Tipo", "tipo_forno"),
+            ("MDC por ciclo", "capacidade_efetiva_mdc"),
+            ("Situação", "get_situacao_display"),
+            ("Empresa", "empresa"),
+        ],
+        "busca": ["numero", "upc__nome", "tipo_forno__nome", "empresa__razao_social"],
+        "somente_admin": False,
+    },
+    "boxes-lenha": {
+        "titulo": "Box de lenha",
+        "modelo": BoxLenha,
+        "formulario": BoxLenhaForm,
+        "colunas": [
+            ("UPC", "upc"),
+            ("Box", "numero"),
+            ("Descrição", "descricao"),
+            ("Capacidade (MST)", "capacidade_mst"),
+            ("Estoque estimado (MST)", "estoque_mst"),
+            ("Situação", "get_situacao_display"),
+            ("Empresa", "empresa"),
+        ],
+        "busca": ["numero", "descricao", "upc__nome", "empresa__razao_social"],
+        "somente_admin": False,
+    },
+    "ciclos-forno": {
+        "titulo": "Ciclos de forno",
+        "modelo": CicloForno,
+        "formulario": CicloFornoForm,
+        "colunas": [
+            ("Forno", "forno"),
+            ("Ciclo", "numero_ciclo"),
+            ("Status", "get_status_display"),
+            ("Enchimento", "data_inicio_enchimento"),
+            ("Descarga", "data_descarga"),
+            ("Lenha (MST)", "volume_lenha_enchimento"),
+            ("Carvão (MDC)", "volume_mdc"),
+            ("MST/MDC", "fator_mst_por_mdc"),
+            ("Alerta", "alerta_fator"),
+            ("Empresa", "empresa"),
+        ],
+        "busca": [
+            "forno__numero",
+            "forno__upc__nome",
+            "fornecedor__nome_razao_social",
+            "empresa__razao_social",
+        ],
         "somente_admin": False,
     },
     "centros-custo": {
@@ -600,7 +694,16 @@ RECURSOS: dict[str, dict[str, Any]] = {
 
 
 def eh_administrador(usuario: Usuario) -> bool:
-    return usuario.is_superuser or usuario.tipo_usuario == TipoUsuario.ADMINISTRADOR
+    return usuario.eh_administrador
+
+
+def usuarios_visiveis(usuario: Usuario) -> QuerySet[Usuario]:
+    """Superusuário vê todos; o administrador, só os usuários da sua matriz."""
+    if usuario.is_superuser:
+        return Usuario.objects.all()
+    if usuario.matriz_id is None:
+        return Usuario.objects.none()
+    return Usuario.objects.filter(matriz_id=usuario.matriz_id, is_superuser=False)
 
 
 def usuario_autenticado(request: HttpRequest) -> Usuario:
@@ -630,19 +733,18 @@ def upcs_visiveis(request: HttpRequest) -> QuerySet[UPC]:
     ativa = upc_ativa(request)
     if ativa is not None:
         return UPC.objects.filter(pk=ativa.pk)
-    usuario = usuario_autenticado(request)
-    if eh_administrador(usuario):
-        empresa = empresa_ativa(request)
-        return UPC.objects.filter(empresa=empresa) if empresa else UPC.objects.all()
-    return usuario.upcs_permitidas()
+    empresa = empresa_ativa(request)
+    if empresa is None:
+        return UPC.objects.none()
+    return usuario_autenticado(request).upcs_permitidas(empresa)
 
 
 @login_required
 def selecionar_empresa(request: HttpRequest) -> HttpResponse:
-    if not eh_administrador(usuario_autenticado(request)):
-        return redirect("inicio")
     formulario = ContextoEmpresaForm(
-        request.POST or None, initial={"empresa": empresa_ativa(request)}
+        request.POST or None,
+        empresas=usuario_autenticado(request).empresas_permitidas(),
+        initial={"empresa": empresa_ativa(request)},
     )
     if request.method == "POST" and formulario.is_valid():
         definir_empresa_ativa(request, formulario.cleaned_data["empresa"])
@@ -659,9 +761,12 @@ def selecionar_upc(request: HttpRequest) -> HttpResponse:
     usuario = usuario_autenticado(request)
     if not usa_contexto_de_upc(usuario):
         return redirect("inicio")
+    empresa = empresa_ativa(request)
+    if empresa is None:
+        return redirect("selecionar_empresa")
     formulario = ContextoUPCForm(
         request.POST or None,
-        upcs=usuario.upcs_permitidas(),
+        upcs=usuario.upcs_permitidas(empresa),
         initial={"upc": upc_ativa(request)},
     )
     if request.method == "POST" and formulario.is_valid():
@@ -672,7 +777,7 @@ def selecionar_upc(request: HttpRequest) -> HttpResponse:
         "sistema/selecionar_upc.html",
         {
             "formulario": formulario,
-            "empresa": usuario.empresa,
+            "empresa": empresa,
             "proximo": request.GET.get("proximo", ""),
         },
     )
@@ -703,66 +808,43 @@ class TrocarSenhaView(PasswordChangeView):
         return resposta
 
 
+RESUMO_DA_EMPRESA = {
+    "fazendas": Fazenda,
+    "proprietarios": Proprietario,
+    "fornecedores": Fornecedor,
+    "plantios": Plantio,
+    "talhoes": Talhao,
+    "inventarios": InventarioFlorestal,
+    "autorizacoes": AutorizacaoAmbiental,
+    "expedicoes": Expedicao,
+    "transportes": TransporteLenha,
+    "colheitas": Colheita,
+}
+
+
 @login_required
 def inicio(request: HttpRequest) -> HttpResponse:
     usuario = usuario_autenticado(request)
     administrador = eh_administrador(usuario)
-    fazendas = Fazenda.objects.all()
-    proprietarios = Proprietario.objects.all()
-    fornecedores = Fornecedor.objects.all()
-    plantios = Plantio.objects.all()
-    talhoes = Talhao.objects.all()
-    upcs = UPC.objects.all()
-    inventarios = InventarioFlorestal.objects.all()
-    autorizacoes = AutorizacaoAmbiental.objects.all()
-    expedicoes = Expedicao.objects.all()
-    transportes = TransporteLenha.objects.all()
-    colheitas = Colheita.objects.all()
     empresa = empresa_ativa(request)
-    if empresa is not None:
-        empresa_id = empresa.pk
-        colheitas = restringir_por_upc(colheitas.filter(empresa_id=empresa_id), request)
-        transportes = restringir_por_upc(
-            transportes.filter(empresa_id=empresa_id), request
-        )
-        expedicoes = restringir_por_upc(
-            expedicoes.filter(empresa_id=empresa_id), request
-        )
-        autorizacoes = restringir_por_upc(
-            autorizacoes.filter(empresa_id=empresa_id), request
-        )
-        inventarios = restringir_por_upc(
-            inventarios.filter(empresa_id=empresa_id), request
-        )
-        upcs = upcs_visiveis(request)
-        fazendas = fazendas.filter(empresa_id=empresa_id)
-        proprietarios = proprietarios.filter(empresa_id=empresa_id)
-        fornecedores = fornecedores.filter(empresa_id=empresa_id)
-        plantios = plantios.filter(empresa_id=empresa_id)
-        talhoes = talhoes.filter(empresa_id=empresa_id)
-    resumo = {
-        "fazendas": fazendas.count(),
-        "proprietarios": proprietarios.count(),
-        "fornecedores": fornecedores.count(),
-        "plantios": plantios.count(),
-        "talhoes": talhoes.count(),
-        "upcs": upcs.count(),
-        "inventarios": inventarios.count(),
-        "autorizacoes": autorizacoes.count(),
-        "expedicoes": expedicoes.count(),
-        "transportes": transportes.count(),
-        "colheitas": colheitas.count(),
-        "estados": Estado.objects.count(),
-        "municipios_ibge": Municipio.objects.filter(ativo=True).count(),
-    }
+    resumo: dict[str, int] = {}
+    for chave, modelo in RESUMO_DA_EMPRESA.items():
+        registros = modelo.objects.none()
+        if empresa is not None:
+            registros = restringir_por_upc(
+                modelo.objects.filter(empresa_id=empresa.pk), request
+            )
+        resumo[chave] = registros.distinct().count()
+    resumo["upcs"] = upcs_visiveis(request).count()
+    resumo["estados"] = Estado.objects.count()
+    resumo["municipios_ibge"] = Municipio.objects.filter(ativo=True).count()
     if administrador:
+        empresas = usuario.empresas_permitidas()
         resumo.update(
             {
-                "empresas": Empresa.objects.count(),
-                "usuarios": Usuario.objects.filter(
-                    is_active=True, is_superuser=False
-                ).count(),
-                "parametros": Parametros.objects.count(),
+                "empresas": empresas.count(),
+                "usuarios": usuarios_visiveis(usuario).filter(is_active=True).count(),
+                "parametros": Parametros.objects.filter(empresa__in=empresas).count(),
             }
         )
     return render(
@@ -770,7 +852,7 @@ def inicio(request: HttpRequest) -> HttpResponse:
         "sistema/inicio.html",
         {
             "administrador": administrador,
-            "empresa": empresa_ativa(request),
+            "empresa": empresa,
             "resumo": resumo,
             "primeira_empresa": administrador and resumo["empresas"] == 0,
         },
@@ -873,10 +955,25 @@ RECURSOS_DO_OPERADOR = {
     "colheitas",
     "expedicoes",
     "transportes-lenha",
-    "producoes-carvao",
+    "ciclos-forno",
     "inventarios",
     "inventarios-talhao",
 }
+
+
+def recurso_depende_de_empresa(recurso: str) -> bool:
+    configuracao = RECURSOS.get(recurso)
+    return configuracao is None or configuracao["modelo"] in MODELOS_POR_EMPRESA
+
+
+def usuario_pode_acessar(usuario: object, recurso: str) -> bool:
+    """Regra única para o menu, os atalhos e o acesso às telas."""
+    configuracao = RECURSOS.get(recurso)
+    if configuracao is None or not isinstance(usuario, Usuario):
+        return False
+    if eh_administrador(usuario):
+        return True
+    return not configuracao["somente_admin"] and _perfil_acessa(usuario, recurso)
 
 
 def _perfil_acessa(usuario: Usuario, recurso: str) -> bool:
@@ -892,15 +989,7 @@ def _configurar_recurso(request: HttpRequest, recurso: str) -> dict[str, Any]:
     configuracao = RECURSOS.get(recurso)
     if configuracao is None:
         raise Http404
-    if configuracao["somente_admin"] and not eh_administrador(usuario):
-        raise PermissionDenied
-    if not eh_administrador(usuario) and not _perfil_acessa(usuario, recurso):
-        raise PermissionDenied
-    if (
-        configuracao["modelo"] in MODELOS_POR_EMPRESA
-        and not eh_administrador(usuario)
-        and usuario.empresa_id is None
-    ):
+    if not usuario_pode_acessar(usuario, recurso):
         raise PermissionDenied
     return configuracao
 
@@ -915,20 +1004,45 @@ def _queryset_recurso(
     request: HttpRequest, configuracao: dict[str, Any]
 ) -> QuerySet[Model]:
     usuario = usuario_autenticado(request)
-    queryset = configuracao["modelo"].objects.all()
-    if configuracao["modelo"] is Municipio:
+    modelo = configuracao["modelo"]
+    queryset = modelo.objects.all()
+    if modelo is Municipio:
         queryset = queryset.filter(ativo=True)
+    elif modelo is Empresa:
+        queryset = usuario.empresas_permitidas()
+    elif modelo is Usuario:
+        queryset = usuarios_visiveis(usuario)
+    elif modelo is Parametros:
+        queryset = queryset.filter(empresa__in=usuario.empresas_permitidas())
+    elif modelo in MODELOS_POR_EMPRESA:
+        empresa = empresa_ativa(request)
+        if empresa is None:
+            return queryset.none()
+        queryset = restringir_por_upc(queryset.filter(empresa_id=empresa.pk), request)
+        if modelo is UPC:
+            queryset = queryset.filter(pk__in=upcs_visiveis(request))
+    return queryset
+
+
+def _somente_consulta(request: HttpRequest, configuracao: dict[str, Any]) -> bool:
+    """Empresa encerrada: os dados dela ficam só para consulta."""
+    if configuracao.get("somente_leitura"):
+        return True
     empresa = empresa_ativa(request)
-    if (
+    return (
         configuracao["modelo"] in MODELOS_POR_EMPRESA
         and empresa is not None
-        and not eh_administrador(usuario)
-    ):
-        queryset = queryset.filter(empresa_id=empresa.pk)
-        queryset = restringir_por_upc(queryset, request)
-    if configuracao["modelo"] is UPC and not eh_administrador(usuario):
-        queryset = queryset.filter(pk__in=upcs_visiveis(request))
-    return queryset
+        and empresa.encerrada
+    )
+
+
+def _recusar_empresa_encerrada(request: HttpRequest, recurso: str) -> HttpResponse:
+    empresa = empresa_ativa(request)
+    messages.error(
+        request,
+        f"{empresa} está encerrada: os registros ficam disponíveis só para consulta.",
+    )
+    return redirect("lista_registros", recurso=recurso)
 
 
 @login_required
@@ -945,9 +1059,8 @@ def lista_registros(request: HttpRequest, recurso: str) -> HttpResponse:
     if not objetos.ordered:
         objetos = objetos.order_by("pk")
     pagina = Paginator(objetos, 25).get_page(request.GET.get("page"))
-    colunas = configuracao["colunas"]
-    if not eh_administrador(usuario_autenticado(request)):
-        colunas = [(rotulo, campo) for rotulo, campo in colunas if campo != "empresa"]
+    # Os dados são sempre da empresa ativa: a coluna "Empresa" seria repetida.
+    colunas = [coluna for coluna in configuracao["colunas"] if coluna[1] != "empresa"]
     linhas = [
         {
             "objeto": objeto,
@@ -970,7 +1083,9 @@ def lista_registros(request: HttpRequest, recurso: str) -> HttpResponse:
             "linhas": linhas,
             "pagina": pagina,
             "termo": termo,
-            "somente_leitura": configuracao.get("somente_leitura", False),
+            "somente_leitura": _somente_consulta(request, configuracao),
+            "consulta_de_encerrada": _somente_consulta(request, configuracao)
+            and not configuracao.get("somente_leitura"),
         },
     )
 
@@ -981,6 +1096,8 @@ def excluir_registro(request: HttpRequest, recurso: str, pk: int) -> HttpRespons
     usuario = usuario_autenticado(request)
     if configuracao.get("somente_leitura") or not eh_administrador(usuario):
         raise PermissionDenied
+    if _somente_consulta(request, configuracao):
+        return _recusar_empresa_encerrada(request, recurso)
     objeto = get_object_or_404(_queryset_recurso(request, configuracao), pk=pk)
     lista = reverse("lista_registros", args=[recurso])
     if objeto == usuario:
@@ -1012,7 +1129,16 @@ def _proximo_seguro(request: HttpRequest) -> str | None:
     return destino if destino and permitido else None
 
 
-UPC_DO_CONTEXTO = (InventarioFlorestal, AutorizacaoAmbiental, ProducaoCarvao)
+UPC_DO_CONTEXTO = (InventarioFlorestal, AutorizacaoAmbiental, Forno, BoxLenha)
+
+
+def _limitar_fornos_e_boxes(formulario: ModelForm, request: HttpRequest) -> None:
+    """Fornos e boxes só das UPCs que o usuário enxerga."""
+    upcs = upcs_visiveis(request)
+    for nome in ("forno", "box_lenha"):
+        campo = formulario.fields.get(nome)
+        if campo is not None:
+            campo.queryset = campo.queryset.filter(upc__in=upcs)
 
 
 def _limitar_upcs(
@@ -1028,7 +1154,7 @@ def _limitar_upcs(
     if eh_administrador(usuario):
         campo.queryset = UPC.objects.filter(empresa=empresa_fixa)
     else:
-        campo.queryset = usuario.upcs_permitidas().filter(empresa=empresa_fixa)
+        campo.queryset = usuario.upcs_permitidas(empresa_fixa)
     ativa = upc_ativa(request)
     if ativa is not None and modelo in UPC_DO_CONTEXTO:
         if modelo is AutorizacaoAmbiental:
@@ -1049,12 +1175,9 @@ def _adicionar_atalhos(
     retorno = urlencode({"proximo": _caminho_sem_selecao(request)})
     for nome_campo, destino in ATALHOS_DE_CADASTRO.items():
         campo = formulario.fields.get(nome_campo)
-        restrito = RECURSOS[destino].get("somente_admin")
         if campo is None or destino == recurso:
             continue
-        if restrito and not eh_administrador(usuario):
-            continue
-        if not eh_administrador(usuario) and not _perfil_acessa(usuario, destino):
+        if not usuario_pode_acessar(usuario, destino):
             continue
         campo.atalho_url = (
             f"{reverse('novo_registro', args=[destino])}?{retorno}"
@@ -1077,6 +1200,20 @@ def _destino_com_selecao(proximo: str, campo: str, pk: object) -> str:
     return urlunsplit(partes._replace(query=urlencode(consulta)))
 
 
+def _salvar_registro(formulario: ModelForm, registro: Model, usuario: Usuario) -> None:
+    """Grava o registro, os vínculos e o que o formulário criar junto (ex.: lote)."""
+    if isinstance(registro, (Usuario, RegistroAuditavel)):
+        if registro.pk is None:
+            registro.usuario_inclusao = usuario
+        registro.usuario_alteracao = usuario
+    with transaction.atomic():
+        registro.save()
+        formulario.save_m2m()
+        salvar_extras = getattr(formulario, "salvar_extras", None)
+        if salvar_extras is not None:
+            salvar_extras(registro)
+
+
 @login_required
 def formulario_registro(
     request: HttpRequest, recurso: str, pk: int | None = None
@@ -1084,15 +1221,12 @@ def formulario_registro(
     configuracao = _configurar_recurso(request, recurso)
     if configuracao.get("somente_leitura"):
         raise PermissionDenied
+    if _somente_consulta(request, configuracao):
+        return _recusar_empresa_encerrada(request, recurso)
     usuario = usuario_autenticado(request)
     empresa_do_contexto = empresa_ativa(request)
     modelo = configuracao["modelo"]
-    if (
-        modelo in MODELOS_POR_EMPRESA
-        and eh_administrador(usuario)
-        and pk is None
-        and empresa_do_contexto is None
-    ):
+    if modelo in MODELOS_POR_EMPRESA and empresa_do_contexto is None:
         proximo = urlencode({"proximo": request.get_full_path()})
         return redirect(f"{reverse('selecionar_empresa')}?{proximo}")
     queryset = _queryset_recurso(request, configuracao)
@@ -1107,11 +1241,14 @@ def formulario_registro(
         )
     if empresa_fixa is not None and modelo in FORMULARIOS_DO_GESTOR:
         formulario_class = FORMULARIOS_DO_GESTOR[configuracao["modelo"]]
-    argumentos = {"empresa": empresa_fixa} if empresa_fixa else {}
+    argumentos: dict[str, Any] = {"empresa": empresa_fixa} if empresa_fixa else {}
+    if getattr(formulario_class, "recebe_usuario", False):
+        argumentos["usuario"] = usuario
     formulario = formulario_class(
         request.POST or None, instance=instancia, **argumentos
     )
     _limitar_upcs(formulario, request, configuracao["modelo"], empresa_fixa)
+    _limitar_fornos_e_boxes(formulario, request)
     proximo = _proximo_seguro(request)
     _adicionar_atalhos(request, formulario, recurso, usuario)
 
@@ -1119,12 +1256,7 @@ def formulario_registro(
         registro: Model = formulario.save(commit=False)
         if empresa_fixa:
             registro.empresa = empresa_fixa
-        if isinstance(registro, (Usuario, RegistroAuditavel)):
-            if registro.pk is None:
-                registro.usuario_inclusao = usuario
-            registro.usuario_alteracao = usuario
-        registro.save()
-        formulario.save_m2m()
+        _salvar_registro(formulario, registro, usuario)
         messages.success(request, f"{configuracao['titulo']}: registro salvo.")
         campo_origem = request.GET.get("campo", "")
         if proximo and campo_origem:
