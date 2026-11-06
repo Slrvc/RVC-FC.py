@@ -55,3 +55,70 @@ MENSAGENS = {
     "cep": "Informe um CEP com 8 dígitos.",
     "telefone": "Informe o telefone com DDD (10 ou 11 dígitos).",
 }
+
+
+# ---------------------------------------------------------------------------
+# Exibição de números e datas conforme os Parâmetros do sistema.
+
+_TOKENS_DATA = (("yyyy", "%Y"), ("yy", "%y"), ("dd", "%d"), ("mm", "%m"))
+_TOKENS_HORA = (("hh", "%H"), ("mm", "%M"), ("ss", "%S"))
+
+
+def _padrao_strftime(formato: str, tokens: tuple[tuple[str, str], ...]) -> str:
+    resultado, posicao = "", 0
+    texto = formato.lower()
+    while posicao < len(texto):
+        for token, codigo in tokens:
+            if texto.startswith(token, posicao):
+                resultado += codigo
+                posicao += len(token)
+                break
+        else:
+            resultado += formato[posicao]
+            posicao += 1
+    return resultado
+
+
+def formatar_data(valor, parametros) -> str:
+    return valor.strftime(
+        _padrao_strftime(parametros.formato_data or "dd/mm/yyyy", _TOKENS_DATA)
+    )
+
+
+def formatar_data_hora(valor, parametros) -> str:
+    hora = _padrao_strftime(parametros.formato_hora or "hh:mm", _TOKENS_HORA)
+    return f"{formatar_data(valor, parametros)} {valor.strftime(hora)}"
+
+
+def casas_do_campo(nome: str, parametros) -> int | None:
+    """Casas decimais pelo nome do campo; None mantém as do próprio valor."""
+    nome = nome.lower()
+    if "valor" in nome or "custo" in nome or "preco" in nome:
+        return parametros.casas_decimais_valor
+    if "pct" in nome or "percent" in nome or "tolerancia" in nome:
+        return parametros.casas_decimais_porcentagem
+    if "fator" in nome:
+        return None
+    if "peso" in nome or nome.endswith("_kg"):
+        return parametros.casas_decimais_peso
+    if "mdc" in nome or "capacidade" in nome:
+        return parametros.casas_decimais_mdc
+    if "volume" in nome or "m3" in nome or "mst" in nome or "estoque" in nome:
+        return parametros.casas_decimais_volume
+    if "area" in nome or nome.endswith("_ha"):
+        return parametros.casas_decimais_ha
+    return None
+
+
+def formatar_numero(valor, parametros, casas: int | None = None) -> str:
+    from decimal import ROUND_HALF_UP, Decimal
+
+    numero = Decimal(valor)
+    if casas is None:
+        expoente = numero.normalize().as_tuple().exponent
+        casas = max(0, -expoente) if isinstance(expoente, int) else 0
+    numero = numero.quantize(Decimal(1).scaleb(-casas), rounding=ROUND_HALF_UP)
+    texto = f"{numero:,.{casas}f}"
+    milhar = parametros.separador_milhar or ""
+    decimal = parametros.separador_decimal or ","
+    return texto.replace(",", "\0").replace(".", decimal).replace("\0", milhar)

@@ -1,6 +1,6 @@
 import json
 import re
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from gzip import compress as compress_gzip
 from io import BytesIO
@@ -24,6 +24,7 @@ from sistema.forms import (
     FazendaGestorForm,
     FornecedorForm,
     FornecedorGestorForm,
+    FornecedorTarifaGestorForm,
     InventarioFlorestalGestorForm,
     InventarioTalhaoGestorForm,
     ParametrosForm,
@@ -45,17 +46,21 @@ from sistema.models import (
     CategoriaCusto,
     CentroCusto,
     CicloForno,
+    Colheita,
     Empresa,
     Equipamento,
     Estado,
     Fazenda,
     Fornecedor,
+    FornecedorTarifa,
     Forno,
     InventarioFlorestal,
     LancamentoCusto,
     LancamentoCustoRateio,
     Municipio,
     ParametroEmpresa,
+    Parametros,
+    PlanejamentoForno,
     Plantio,
     Proprietario,
     StatusCiclo,
@@ -64,6 +69,7 @@ from sistema.models import (
     TipoForno,
     Usuario,
 )
+from sistema.painel import grade_do_mes
 from sistema.views import RECURSOS
 
 ADMIN_CREDENTIAL = "Admin-seguro#7291"
@@ -333,6 +339,41 @@ class FluxoAdministrativoTests(TestCase):
         )
         return upc, forno
 
+    def test_forno_aparece_com_o_nome_do_tipo_e_o_numero(self):
+        upc, forno = self._criar_upc_com_forno()
+        tipo = TipoForno.objects.create(
+            empresa=self.empresa, nome="FCM", diametro_m="5.50", capacidade_mdc="18"
+        )
+        retangular = TipoForno.objects.create(
+            empresa=self.empresa,
+            nome="FRM",
+            formato="RETANGULAR",
+            comprimento_m="10",
+            largura_m="4",
+            capacidade_mdc="110",
+        )
+        fcm = Forno.objects.create(
+            empresa=self.empresa, upc=upc, tipo_forno=tipo, numero="01"
+        )
+        self.assertEqual(fcm.identificacao, "FCM 01")
+        self.assertEqual(str(fcm), "U1 - FCM 01")
+        self.assertEqual(fcm.formato, "Circular")
+        # Número com letras (cadastro antigo) continua como está.
+        self.assertEqual(forno.identificacao, "F01")
+        # O mesmo número pode existir em outro tipo na mesma UPC.
+        self.client.force_login(self.gestor)
+        url = reverse("novo_registro", args=["fornos"])
+        dados = {"upc": upc.pk, "numero": "01", "situacao": "ATIVO", "quantidade": "1"}
+        self.assertEqual(
+            self.client.post(url, {**dados, "tipo_forno": retangular.pk}).status_code,
+            302,
+        )
+        repetido = self.client.post(url, {**dados, "tipo_forno": tipo.pk})
+        self.assertContains(repetido, "Já existem na UPC: 01.")
+        lista = self.client.get(reverse("lista_registros", args=["fornos"]))
+        self.assertContains(lista, "FCM 01")
+        self.assertContains(lista, "Retangular")
+
     def test_ciclo_forno_calcula_fatores_status_e_alerta(self):
         _, forno = self._criar_upc_com_forno()
         ciclo = CicloForno.objects.create(
@@ -342,24 +383,36 @@ class FluxoAdministrativoTests(TestCase):
             volume_lenha_enchimento=Decimal("40"),
         )
         self.assertEqual(ciclo.numero_ciclo, 1)
-        self.assertEqual(ciclo.status, StatusCiclo.ENCHIMENTO)
+        # O enchimento já é o início da carbonização.
+        self.assertEqual(ciclo.status, StatusCiclo.CARBONIZACAO)
+        self.assertEqual(ciclo.data_acendimento, ciclo.data_inicio_enchimento)
         self.assertEqual(ciclo.fator_conversao, Decimal("1.5"))
         self.assertEqual(ciclo.volume_lenha_m3, Decimal("26.667"))
         self.assertEqual(ciclo.alerta_fator, "")
+        self.assertEqual(
+            ciclo.prevista_fim_carbonizacao,
+            datetime.fromisoformat("2026-01-07T08:00Z"),
+        )
+        self.assertIn("carbonização passou do prazo", ciclo.alerta_prazo)
 
-        ciclo.data_acendimento = datetime.fromisoformat("2026-01-02T08:00Z")
         ciclo.data_fim_carbonizacao = datetime.fromisoformat("2026-01-05T20:00Z")
         ciclo.data_descarga = datetime.fromisoformat("2026-01-09T08:00Z")
         ciclo.volume_mdc = Decimal("20")
         ciclo.save()
         ciclo.refresh_from_db()
         self.assertEqual(ciclo.status, StatusCiclo.DESCARREGADO)
-        self.assertEqual(ciclo.dias_carbonizacao, Decimal("3.50"))
+        self.assertEqual(ciclo.dias_carbonizacao, Decimal("4.50"))
         self.assertEqual(ciclo.dias_resfriamento, Decimal("3.50"))
         self.assertEqual(ciclo.dias_ciclo, Decimal("8.00"))
         self.assertEqual(ciclo.fator_mst_por_mdc, Decimal("2.0000"))
         self.assertEqual(ciclo.fator_m3_por_mdc, Decimal("1.3333"))
         self.assertEqual(ciclo.alerta_fator, "")
+        self.assertEqual(ciclo.alerta_prazo, "")
+        self.assertIsNone(ciclo.prevista_da_etapa)
+
+        ciclo.data_descarga = datetime.fromisoformat("2026-01-12T08:00Z")
+        ciclo.save()
+        self.assertIn("resfriamento passou do prazo", ciclo.alerta_prazo)
 
         ciclo.volume_mdc = Decimal("10")
         ciclo.save()
@@ -403,6 +456,294 @@ class FluxoAdministrativoTests(TestCase):
         )
         self.assertEqual(ciclo.valor_producao, Decimal("234.00"))
 
+    def test_painel_dos_fornos_mostra_estado_de_cada_dia(self):
+        _, forno = self._criar_upc_com_forno()
+        local = timezone.get_current_timezone()
+        CicloForno.objects.create(
+            empresa=self.empresa,
+            forno=forno,
+            data_inicio_enchimento=datetime(2026, 8, 1, 10, tzinfo=local),
+            data_acendimento=datetime(2026, 8, 2, 9, tzinfo=local),
+            data_fim_carbonizacao=datetime(2026, 8, 6, 10, tzinfo=local),
+            data_descarga=datetime(2026, 8, 10, 10, tzinfo=local),
+            volume_lenha_enchimento=Decimal("40"),
+            volume_mdc=Decimal("19.1"),
+        )
+        self.client.force_login(self.gestor)
+        resposta = self.client.get(reverse("painel_fornos"), {"mes": "2026-08"})
+        self.assertEqual(resposta.status_code, 200)
+        grade = resposta.context["grade"]
+        estados = grade["linhas"][0]["estados"]
+        self.assertEqual(estados[:11], list("LCCCCRRRRDV"))
+        self.assertEqual(grade["linhas"][0]["ciclos"], 1)
+        self.assertEqual(grade["total_mdc"], "19,10")
+        self.assertEqual(grade["producao_dia"][9], "19,10")
+        # Mês inválido cai no mês atual.
+        self.assertEqual(
+            self.client.get(reverse("painel_fornos"), {"mes": "x"}).status_code, 200
+        )
+
+    def test_planejamento_escalona_fornos_e_projeta_o_planejado(self):
+        upc, forno = self._criar_upc_com_forno()
+        for numero in ("F02", "F03"):
+            Forno.objects.create(
+                empresa=self.empresa, upc=upc, tipo_forno=forno.tipo_forno, numero=numero
+            )
+        self.client.force_login(self.gestor)
+        resposta = self.client.post(
+            reverse("novo_registro", args=["planejamentos-forno"]),
+            {
+                "forno": forno.pk,
+                "data_primeiro_enchimento": "2026-08-06",
+                "mdc_previsto": "20",
+                "quantidade": "3",
+                "fornos_por_dia": "2",
+            },
+        )
+        self.assertEqual(resposta.status_code, 302)
+        datas = dict(
+            PlanejamentoForno.objects.values_list(
+                "forno__numero", "data_primeiro_enchimento"
+            )
+        )
+        self.assertEqual(
+            datas,
+            {
+                "F01": date(2026, 8, 6),
+                "F02": date(2026, 8, 6),
+                "F03": date(2026, 8, 7),
+            },
+        )
+        repetido = self.client.post(
+            reverse("novo_registro", args=["planejamentos-forno"]),
+            {"forno": forno.pk, "data_primeiro_enchimento": "2026-08-20"},
+        )
+        self.assertIn("forno", repetido.context["formulario"].errors)
+
+        grade = self.client.get(
+            reverse("painel_fornos"), {"mes": "2026-08"}
+        ).context["grade"]
+        linha = grade["linhas"][0]
+        # 5 dias vazios, 6 carbonizando, 6 resfriando, descarga e nova carga
+        # no dia seguinte (de trabalho).
+        self.assertEqual(
+            "".join(linha["planejados"][:25]), "VVVVVCCCCCCRRRRRRDCCCCCCR"
+        )
+        # Descargas em 18/08 e 31/08; o F03 (enchido em 07/08) só a de 19/08.
+        self.assertEqual(linha["ciclos_pl"], 2)
+        self.assertEqual(linha["mdc_pl"], "40,00")
+        self.assertEqual(grade["total_ciclos_pl"], 5)
+        self.assertEqual(grade["total_mdc_pl"], "100,00")
+        so_pl = self.client.get(
+            reverse("painel_fornos"), {"mes": "2026-08", "ver": "pl"}
+        )
+        self.assertNotContains(so_pl, ">RE<")
+
+    def test_planejado_sem_planejamento_segue_o_ultimo_ciclo_real(self):
+        _, forno = self._criar_upc_com_forno()
+        local = timezone.get_current_timezone()
+        CicloForno.objects.create(
+            empresa=self.empresa,
+            forno=forno,
+            data_inicio_enchimento=datetime(2026, 7, 28, 8, tzinfo=local),
+            volume_lenha_enchimento=Decimal("40"),
+        )
+        self.client.force_login(self.gestor)
+        grade = self.client.get(
+            reverse("painel_fornos"), {"mes": "2026-08"}
+        ).context["grade"]
+        # Enchido em 28/07: carboniza até 02/08 e resfria; a descarga prevista
+        # (09/08) é domingo, então fica para segunda, 10/08.
+        self.assertEqual(
+            "".join(grade["linhas"][0]["planejados"][:10]), "CCRRRRRRRD"
+        )
+
+    def test_planejado_respeita_os_dias_de_trabalho_da_upc(self):
+        upc, forno = self._criar_upc_com_forno()
+        upc.regime_sabado = "ALTERNADO"
+        upc.sabado_referencia = date(2026, 11, 14)
+        upc.save()
+        self.assertTrue(upc.dia_de_trabalho(date(2026, 11, 14)))
+        self.assertFalse(upc.dia_de_trabalho(date(2026, 11, 7)))
+        self.assertFalse(upc.dia_de_trabalho(date(2026, 11, 21)))
+        self.assertTrue(upc.dia_de_trabalho(date(2026, 11, 28)))
+        self.assertFalse(upc.dia_de_trabalho(date(2026, 11, 15)))  # domingo
+        outro = Forno.objects.create(
+            empresa=self.empresa, upc=upc, tipo_forno=forno.tipo_forno, numero="F02"
+        )
+        for alvo, inicio in ((forno, date(2026, 11, 2)), (outro, date(2026, 11, 3))):
+            PlanejamentoForno.objects.create(
+                empresa=self.empresa, forno=alvo, data_primeiro_enchimento=inicio
+            )
+        # Planejado visto antes do mês começar (independe da data de hoje).
+        linhas = grade_do_mes(
+            Forno.objects.filter(upc=upc),
+            2026,
+            11,
+            Parametros.da_empresa(self.empresa),
+            hoje=date(2026, 10, 31),
+        )["linhas"]
+        # Descarga no sábado trabalhado (14/11): domingo vazio, enche na segunda.
+        self.assertEqual("".join(linhas[0]["planejados"][:16]), "VCCCCCCRRRRRRDVC")
+        # Descarga prevista no domingo (15/11) fica para segunda (16/11) e o
+        # forno é carregado de novo no dia seguinte, que é de trabalho.
+        self.assertEqual(
+            "".join(linhas[1]["planejados"][:18]), "VVCCCCCCRRRRRRRDCC"
+        )
+
+    def test_planejado_de_hoje_em_diante_parte_do_estado_real(self):
+        upc, forno = self._criar_upc_com_forno()
+        upc.regime_sabado = "ALTERNADO"
+        upc.sabado_referencia = date(2026, 11, 14)
+        upc.save()
+        local = timezone.get_current_timezone()
+        CicloForno.objects.create(
+            empresa=self.empresa,
+            forno=forno,
+            data_inicio_enchimento=datetime(2026, 10, 28, 9, tzinfo=local),
+            data_fim_carbonizacao=datetime(2026, 11, 2, 9, tzinfo=local),
+            data_descarga=datetime(2026, 11, 6, 9, tzinfo=local),
+            volume_lenha_enchimento=Decimal("40"),
+            volume_mdc=Decimal("18"),
+        )
+        grade = grade_do_mes(
+            Forno.objects.filter(pk=forno.pk),
+            2026,
+            11,
+            Parametros.da_empresa(self.empresa),
+            hoje=date(2026, 11, 6),
+        )
+        planejados = "".join(grade["linhas"][0]["planejados"])
+        # Descarregado hoje (sexta 06/11): vazio no sábado de folga e no
+        # domingo, carregado na segunda 09/11.
+        self.assertEqual(planejados[5:9], "DVVC")
+        # Até ontem a linha mostra o real (carbonizou até 01/11, resfriou até
+        # 05/11) e o ciclo seguinte tem os 6 dias de carbonização do tipo.
+        self.assertEqual(planejados[:5], "CRRRR")
+        self.assertEqual(planejados[8:15], "CCCCCCR")
+
+    def test_ritmo_compara_planejado_e_real(self):
+        upc, forno = self._criar_upc_com_forno()
+        local = timezone.get_current_timezone()
+        CicloForno.objects.create(
+            empresa=self.empresa,
+            forno=forno,
+            data_inicio_enchimento=datetime(2026, 7, 25, 8, tzinfo=local),
+            data_fim_carbonizacao=datetime(2026, 7, 31, 8, tzinfo=local),
+            data_descarga=datetime(2026, 8, 6, 8, tzinfo=local),
+            volume_lenha_enchimento=Decimal("40"),
+            volume_mdc=Decimal("15"),
+        )
+        parametros = Parametros.da_empresa(self.empresa)
+        fornos = Forno.objects.filter(upc=upc)
+        ritmo = grade_do_mes(fornos, 2026, 8, parametros, hoje=date(2026, 8, 10))[
+            "ritmo"
+        ]
+        self.assertEqual(ritmo["decorridos"], 10)
+        self.assertEqual(ritmo["restantes"], 21)
+        self.assertEqual(ritmo["real"], "15,00")
+        self.assertEqual(ritmo["ritmo_real"], "1,50")
+        self.assertIsNotNone(ritmo["ritmo_necessario"])
+        # Mês encerrado: o fechamento é o realizado.
+        fechado = grade_do_mes(fornos, 2026, 8, parametros, hoje=date(2026, 9, 5))[
+            "ritmo"
+        ]
+        self.assertEqual(fechado["restantes"], 0)
+        self.assertEqual(fechado["previsao"], "15,00")
+        self.assertIsNone(fechado["ritmo_necessario"])
+
+    def test_desempenho_do_ciclo_compara_tempos_e_fatores(self):
+        _, forno = self._criar_upc_com_forno()
+        local = timezone.get_current_timezone()
+        CicloForno.objects.create(
+            empresa=self.empresa,
+            forno=forno,
+            data_inicio_enchimento=datetime(2026, 8, 1, 8, tzinfo=local),
+            data_fim_carbonizacao=datetime(2026, 8, 7, 8, tzinfo=local),
+            data_descarga=datetime(2026, 8, 17, 8, tzinfo=local),
+            volume_lenha_enchimento=Decimal("40"),
+            volume_mdc=Decimal("16"),
+        )
+        CicloForno.objects.create(
+            empresa=self.empresa,
+            forno=forno,
+            data_inicio_enchimento=datetime(2026, 8, 24, 8, tzinfo=local),
+            volume_lenha_enchimento=Decimal("40"),
+        )
+        self.client.force_login(self.gestor)
+        desempenho = self.client.get(
+            reverse("painel_fornos"), {"mes": "2026-08"}
+        ).context["desempenho"]
+        self.assertEqual(desempenho["ciclos"], 1)
+        resfriamento = desempenho["etapas"][1]
+        self.assertEqual(resfriamento["real"], "10,0")
+        self.assertTrue(resfriamento["acima"])
+        # Ciclo real 6 + 10 + 7 = 23 dias contra 6 + 6 + 2 = 14: houve perda.
+        self.assertEqual(desempenho["etapas"][2]["real"], "7,0")
+        self.assertEqual(desempenho["atraso_resf_pct"], 100)
+        # 40 MST / 16 MDC = 2,5 contra a referência de 2,0.
+        self.assertEqual(desempenho["fatores"][0]["real"], "2,50")
+        self.assertTrue(desempenho["fatores"][0]["acima"])
+        self.assertIsNotNone(desempenho["perda_mdc"])
+
+    def test_consolidado_da_colheita_mostra_saldo_e_disponivel(self):
+        inventario = InventarioFlorestal.objects.create(
+            empresa=self.empresa,
+            fazenda=self.fazenda_propria,
+            lote="L6",
+            data_inventario="2026-01-01",
+            responsavel_tecnico="Eng",
+            registro_conselho="CREA",
+            numero_art="A6",
+            area_ha="10",
+            usuario_inclusao=self.gestor,
+            volume_total="1000",
+            numero_arvores="200",
+        )
+        talhao = Talhao.objects.create(
+            empresa=self.empresa,
+            fazenda=self.fazenda_propria,
+            identificacao="T6",
+            area_ha=Decimal("5"),
+            volume_m3=Decimal("500"),
+        )
+        for etapa, volume in (("CORTE_FELLER", "500"), ("TRACAMENTO", "300")):
+            Colheita.objects.create(
+                empresa=self.empresa,
+                inventario=inventario,
+                talhao=talhao,
+                etapa=etapa,
+                data_inicio=date(2026, 5, 10),
+                volume_m3=Decimal(volume),
+            )
+        self.client.force_login(self.gestor)
+        consolidado = self.client.get(reverse("consolidado_colheita")).context[
+            "consolidado"
+        ]
+        linha = consolidado["linhas"][0]
+        self.assertEqual(linha["ifpc"], "500,000")
+        self.assertEqual(linha["disponivel"], "300,000")
+        self.assertEqual(linha["inicio_corte"], date(2026, 5, 10))
+
+    def test_visao_geral_mostra_ciclo_dos_fornos_e_graficos(self):
+        _, forno = self._criar_upc_com_forno()
+        agora = timezone.now()
+        CicloForno.objects.create(
+            empresa=self.empresa,
+            forno=forno,
+            data_inicio_enchimento=agora - timedelta(days=10),
+            volume_lenha_enchimento=Decimal("40"),
+        )
+        self.client.force_login(self.gestor)
+        resposta = self.client.get(reverse("inicio"))
+        dashboard = resposta.context["dashboard"]
+        self.assertEqual(dashboard["fornos"].carbonizando, 1)
+        self.assertEqual(len(dashboard["fornos"].atrasados), 1)
+        # O aviso de atraso fica no painel dos fornos, não na visão geral.
+        self.assertNotContains(resposta, "passou do prazo")
+        self.assertContains(resposta, reverse("painel_fornos"))
+        self.assertEqual(len(dashboard["graficos"]), 3)
+
     def test_formulario_do_ciclo_valida_etapas_e_ciclo_em_andamento(self):
         _, forno = self._criar_upc_com_forno()
         self.client.force_login(self.gestor)
@@ -415,36 +756,52 @@ class FluxoAdministrativoTests(TestCase):
             "tipo_execucao": "PROPRIA",
         }
 
-        fora_de_ordem = self.client.post(
-            url, {**base, "data_fim_carbonizacao": "2026-03-02T08:00"}
-        )
-        self.assertEqual(fora_de_ordem.status_code, 200)
-        self.assertContains(fora_de_ordem, "Preencha o acendimento primeiro.")
-
-        antes = self.client.post(
-            url, {**base, "data_acendimento": "2026-02-28T08:00"}
-        )
-        self.assertContains(antes, "Não pode ser antes do início do enchimento.")
-
-        sem_carvao = self.client.post(
-            url,
-            {
-                **base,
-                "data_acendimento": "2026-03-01T18:00",
-                "data_fim_carbonizacao": "2026-03-04T18:00",
-                "data_descarga": "2026-03-08T08:00",
-            },
-        )
-        self.assertContains(sem_carvao, "Informe o carvão medido na descarga.")
+        tela = self.client.get(url)
+        self.assertContains(tela, "Enchimento de forno")
+        self.assertNotContains(tela, 'name="data_fim_carbonizacao"')
 
         terceirizado = self.client.post(url, {**base, "tipo_execucao": "TERCEIRIZADA"})
         self.assertContains(terceirizado, "Obrigatório na produção terceirizada.")
 
-        self.assertEqual(self.client.post(url, base).status_code, 302)
-        em_andamento = self.client.post(url, base)
-        self.assertContains(em_andamento, "já tem um ciclo em andamento")
+        sem_lenha = self.client.post(url, {**base, "volume_lenha_enchimento": ""})
+        self.assertIn(
+            "volume_lenha_enchimento", sem_lenha.context["formulario"].errors
+        )
+        acendimento_antes = self.client.post(
+            url, {**base, "data_acendimento": "2026-03-01T07:00"}
+        )
+        self.assertContains(acendimento_antes, "Não pode ser antes do enchimento.")
 
+        self.assertEqual(self.client.post(url, base).status_code, 302)
         ciclo = CicloForno.objects.get()
+        self.assertEqual(ciclo.status, StatusCiclo.CARBONIZACAO)
+        lista = self.client.get(reverse("lista_registros", args=["ciclos-forno"]))
+        self.assertEqual(lista.context["local_no_menu"], "Produção · Lançamentos")
+        filtro = lista.context["filtro"]
+        self.assertEqual(filtro["todos"]["total"], 1)
+        self.assertEqual(
+            {opcao["valor"]: opcao["total"] for opcao in filtro["opcoes"]}[
+                "CARBONIZACAO"
+            ],
+            1,
+        )
+        resfriando = self.client.get(
+            reverse("lista_registros", args=["ciclos-forno"]),
+            {"filtro": "RESFRIAMENTO"},
+        )
+        self.assertEqual(resfriando.context["pagina"].paginator.count, 0)
+        # Status com a marca e o texto da legenda do painel dos fornos.
+        self.assertContains(
+            lista,
+            '<span class="estado-celula estado-C" aria-hidden="true">C</span> '
+            "Carbonizando",
+            html=False,
+        )
+        # Forno cheio some da lista do enchimento.
+        em_andamento = self.client.post(url, base)
+        self.assertEqual(em_andamento.status_code, 200)
+        self.assertIn("forno", em_andamento.context["formulario"].errors)
+
         cancelar = self.client.post(
             reverse("editar_registro", args=["ciclos-forno", ciclo.pk]),
             {**base, "cancelado": "on"},
@@ -456,6 +813,86 @@ class FluxoAdministrativoTests(TestCase):
         self.assertEqual(
             CicloForno.objects.order_by("numero_ciclo").last().numero_ciclo, 2
         )
+
+    def test_etapas_do_ciclo_mostram_so_fornos_da_etapa_anterior(self):
+        upc, forno = self._criar_upc_com_forno()
+        outro = Forno.objects.create(
+            empresa=self.empresa, upc=upc, tipo_forno=forno.tipo_forno, numero="F02"
+        )
+        forno.tipo_forno.capacidade_lenha_mst = Decimal("40.13")
+        forno.tipo_forno.save()
+        self.client.force_login(self.gestor)
+        novo = reverse("novo_registro", args=["ciclos-forno"])
+        fim = reverse("etapa_do_ciclo", args=["fim-carbonizacao"])
+        descarga = reverse("etapa_do_ciclo", args=["descarga"])
+
+        # A lenha do tipo é só referência: aparece na ajuda, não é preenchida.
+        tela = self.client.get(novo)
+        self.assertContains(tela, "Referência: Circular 5,5 m: 40,13 MST")
+        self.client.post(
+            novo,
+            {
+                "forno": forno.pk,
+                "data_inicio_enchimento": "2026-03-01T08:00",
+                "data_acendimento": "2026-03-01T20:00",
+                "volume_lenha_enchimento": "39.8",
+                "fator_conversao": "1.5",
+                "tipo_execucao": "PROPRIA",
+            },
+        )
+        ciclo = CicloForno.objects.get(forno=forno)
+        self.assertEqual(ciclo.volume_lenha_enchimento, Decimal("39.8"))
+        # O prazo da carbonização conta do acendimento.
+        self.assertEqual(
+            timezone.localtime(ciclo.prevista_fim_carbonizacao).hour, 20
+        )
+
+        enchimento = self.client.get(novo).context["formulario"]
+        self.assertEqual(list(enchimento.fields["forno"].queryset), [outro])
+        etapa = self.client.get(fim).context["formulario"]
+        self.assertEqual(list(etapa.fields["ciclo"].queryset), [ciclo])
+        self.assertEqual(
+            list(self.client.get(descarga).context["formulario"].fields["ciclo"].queryset),
+            [],
+        )
+
+        antes = self.client.post(
+            fim, {"ciclo": ciclo.pk, "data_fim_carbonizacao": "2026-02-28T08:00"}
+        )
+        self.assertContains(antes, "Não pode ser antes do acendimento")
+        atrasado = self.client.post(
+            fim,
+            {"ciclo": ciclo.pk, "data_fim_carbonizacao": "2026-03-08T08:00"},
+            follow=True,
+        )
+        self.assertContains(atrasado, "carbonização passou do prazo")
+        ciclo.refresh_from_db()
+        self.assertEqual(ciclo.status, StatusCiclo.RESFRIAMENTO)
+        self.assertEqual(
+            list(self.client.get(fim).context["formulario"].fields["ciclo"].queryset),
+            [],
+        )
+
+        sem_carvao = self.client.post(
+            descarga, {"ciclo": ciclo.pk, "data_descarga": "2026-03-12T08:00"}
+        )
+        self.assertIn("volume_mdc", sem_carvao.context["formulario"].errors)
+        self.client.post(
+            descarga,
+            {
+                "ciclo": ciclo.pk,
+                "data_descarga": "2026-03-12T08:00",
+                "volume_mdc": "20",
+                "responsavel_descarga": "Rafael",
+            },
+        )
+        ciclo.refresh_from_db()
+        self.assertEqual(ciclo.status, StatusCiclo.DESCARREGADO)
+        self.assertEqual(ciclo.volume_mdc, Decimal("20"))
+        self.assertEqual(ciclo.responsavel_descarga, "Rafael")
+        # Descarregado, o forno volta a aparecer no enchimento.
+        enchimento = self.client.get(novo).context["formulario"]
+        self.assertEqual(set(enchimento.fields["forno"].queryset), {forno, outro})
 
     def test_fornos_em_lote_seguem_a_numeracao(self):
         self.assertEqual(sequencia_de_numeros("F08", 3), ["F08", "F09", "F10"])
@@ -1010,7 +1447,7 @@ class FluxoAdministrativoTests(TestCase):
             tela_talhoes,
             f'data-plantios-url="{reverse("plantios_por_fazenda")}"',
         )
-        self.assertContains(tela_talhoes, "/static/sistema/app.js?v=11")
+        self.assertContains(tela_talhoes, "/static/sistema/app.js?v=12")
 
         outra = PlantioGestorForm(
             {
@@ -1493,59 +1930,263 @@ class FluxoAdministrativoTests(TestCase):
             fazenda=self.fazenda_propria,
             identificacao="T9",
             area_ha="5",
+            volume_m3="1000",
         )
         dados = {
             "inventario": inventario.pk,
             "talhao": talhao.pk,
-            "area_ha": "5",
-            "volume_total": "50",
+            "etapa": "CORTE_FELLER",
+            "volume_m3": "600",
+            "tipo_execucao": "PROPRIA",
+            "unidade_pagamento": "HA",
+            "valor_unitario": "1500",
             "data_inicio": "2026-03-10",
             "data_fim": "2026-03-01",
         }
+
+        def salvar(formulario: ColheitaGestorForm) -> Colheita:
+            self.assertTrue(formulario.is_valid(), formulario.errors)
+            colheita = formulario.save(commit=False)
+            colheita.empresa = self.empresa
+            colheita.save()
+            return colheita
+
         invalido = ColheitaGestorForm(dados, empresa=self.empresa)
         self.assertFalse(invalido.is_valid())
         self.assertIn("data_fim", invalido.errors)
-        valido = ColheitaGestorForm(
-            {**dados, "data_fim": "2026-03-20"}, empresa=self.empresa
+        dados["data_fim"] = ""
+        sem_empreiteiro = ColheitaGestorForm(
+            {**dados, "tipo_execucao": "TERCEIRIZADA"}, empresa=self.empresa
         )
-        self.assertFalse(valido.is_valid())
-        valido = ColheitaGestorForm(
+        self.assertIn("fornecedor", sem_empreiteiro.errors)
+
+        # Lançamento do dia por volume; a área sai do rendimento (200 m³/ha).
+        colheita = salvar(ColheitaGestorForm(dados, empresa=self.empresa))
+        self.assertEqual(colheita.sistema, "MECANIZADA")
+        self.assertEqual(colheita.rendimento_m3_ha, Decimal("200.000"))
+        self.assertEqual(colheita.area_ha, Decimal("3.0000"))
+        # Pago por hectare: 3 ha x R$ 1.500.
+        self.assertEqual(colheita.valor_total, Decimal("4500.00"))
+        self.assertEqual(colheita.volume_a_fazer(), Decimal("400"))
+
+        # Mesma etapa: só cabe o volume que falta do inventário.
+        maior = ColheitaGestorForm(dados, empresa=self.empresa)
+        self.assertFalse(maior.is_valid())
+        self.assertIn("400,00 m³ a fazer", maior.errors["volume_m3"][0])
+        # Área informada prevalece sobre a estimada.
+        resto = salvar(
+            ColheitaGestorForm(
+                {**dados, "volume_m3": "400", "area_ha": "1.9"},
+                empresa=self.empresa,
+            )
+        )
+        self.assertEqual(resto.area_ha, Decimal("1.9"))
+        self.assertEqual(resto.valor_total, Decimal("2850.00"))
+
+        # Outra etapa tem o próprio saldo; pagamento por m³ e por MST.
+        arraste = salvar(
+            ColheitaGestorForm(
+                {
+                    **dados,
+                    "etapa": "ARRASTE",
+                    "volume_m3": "1000",
+                    "unidade_pagamento": "M3",
+                    "valor_unitario": "3",
+                },
+                empresa=self.empresa,
+            )
+        )
+        self.assertEqual(arraste.valor_total, Decimal("3000.00"))
+        arraste.unidade_pagamento = "MST"
+        arraste.save()
+        self.assertEqual(arraste.valor_total, Decimal("4500.00"))
+
+        # Ao editar, o volume do próprio lançamento não conta como já feito.
+        edicao = ColheitaGestorForm(dados, instance=colheita, empresa=self.empresa)
+        self.assertTrue(edicao.is_valid(), edicao.errors)
+
+    def test_colheita_terceirizada_usa_tarifa_vigente_do_empreiteiro(self):
+        inventario = InventarioFlorestal.objects.create(
+            empresa=self.empresa,
+            fazenda=self.fazenda_propria,
+            lote="L7",
+            data_inventario="2026-01-01",
+            responsavel_tecnico="Eng",
+            registro_conselho="CREA",
+            numero_art="A7",
+            area_ha="10",
+            usuario_inclusao=self.gestor,
+            volume_total="1000",
+            numero_arvores="200",
+        )
+        talhao = Talhao.objects.create(
+            empresa=self.empresa,
+            fazenda=self.fazenda_propria,
+            identificacao="T7",
+            area_ha="10",
+        )
+        empreiteiro = Fornecedor.objects.create(
+            empresa=self.empresa,
+            nome_razao_social="Empreiteiro",
+            cpf_cnpj="11111111111",
+            fornece_servico=True,
+        )
+        for inicio, fim, valor in (
+            ("2026-01-01", "2026-02-28", "10"),
+            ("2026-03-01", None, "12"),
+        ):
+            FornecedorTarifa.objects.create(
+                empresa=self.empresa,
+                fornecedor=empreiteiro,
+                tipo_servico="ARRASTE",
+                unidade="M3",
+                valor=valor,
+                vigencia_inicio=inicio,
+                vigencia_fim=fim,
+            )
+        sobreposta = FornecedorTarifaGestorForm(
             {
-                **dados,
-                "data_fim": "2026-03-20",
-                "sistema": "MECANIZADA",
-                "equipamentos": ["HARVESTER", "SKIDDER"],
+                "fornecedor": empreiteiro.pk,
+                "tipo_servico": "ARRASTE",
+                "unidade": "M3",
+                "valor": "15",
+                "vigencia_inicio": "2026-04-01",
             },
             empresa=self.empresa,
         )
-        self.assertTrue(valido.is_valid(), valido.errors)
-        colheita = valido.save(commit=False)
+        self.assertIn("vigencia_inicio", sobreposta.errors)
+
+        dados = {
+            "inventario": inventario.pk,
+            "talhao": talhao.pk,
+            "etapa": "ARRASTE",
+            "volume_m3": "200",
+            "tipo_execucao": "TERCEIRIZADA",
+            "fornecedor": empreiteiro.pk,
+            "unidade_pagamento": "HA",
+            "data_inicio": "2026-02-15",
+        }
+        formulario = ColheitaGestorForm(dados, empresa=self.empresa)
+        self.assertTrue(formulario.is_valid(), formulario.errors)
+        colheita = formulario.save(commit=False)
         colheita.empresa = self.empresa
         colheita.save()
-        inventario.refresh_from_db()
-        self.assertEqual(colheita.volume_total, inventario.volume_total)
-        errado = ColheitaGestorForm(
-            {
-                **dados,
-                "data_fim": "2026-03-20",
-                "sistema": "MANUAL",
-                "equipamentos": ["HARVESTER"],
-            },
-            empresa=self.empresa,
+        # Tarifa de fevereiro, em m³: 2 ha x 100 m³/ha x R$ 10.
+        self.assertEqual(colheita.valor_unitario, Decimal("10"))
+        self.assertEqual(colheita.unidade_pagamento, "M3")
+        self.assertEqual(colheita.valor_total, Decimal("2000.00"))
+
+        self.client.force_login(self.gestor)
+        resposta = self.client.get(
+            reverse("tarifa_vigente"),
+            {"fornecedor": empreiteiro.pk, "servico": "ARRASTE", "data": "2026-03-05"},
         )
-        self.assertFalse(errado.is_valid())
-        self.assertIn("equipamentos", errado.errors)
-        repetido = ColheitaGestorForm(
-            {
-                **dados,
-                "data_fim": "2026-03-20",
-                "sistema": "MANUAL",
-                "equipamentos": ["MOTOSSERRA"],
-            },
-            empresa=self.empresa,
+        self.assertEqual(Decimal(resposta.json()["tarifa"]["valor"]), Decimal("12"))
+        sem_tarifa = self.client.get(
+            reverse("tarifa_vigente"),
+            {"fornecedor": empreiteiro.pk, "servico": "CORTE_FELLER"},
         )
-        self.assertFalse(repetido.is_valid())
-        self.assertIn("inventario", repetido.errors)
+        self.assertIsNone(sem_tarifa.json()["tarifa"])
+
+    def test_listas_formatam_numeros_e_datas_pelos_parametros_do_sistema(self):
+        Talhao.objects.create(
+            empresa=self.empresa,
+            fazenda=self.fazenda_propria,
+            identificacao="TF",
+            area_ha=Decimal("1234.5678"),
+            volume_m3=Decimal("98765.4321"),
+        )
+        self.client.force_login(self.gestor)
+        lista = reverse("lista_registros", args=["talhoes"])
+        resposta = self.client.get(lista)
+        self.assertContains(resposta, "1.234,57")
+        self.assertContains(resposta, "98.765,432")
+        Parametros.objects.create(
+            empresa=self.empresa,
+            casas_decimais_ha=4,
+            separador_milhar=" ",
+            separador_decimal=".",
+        )
+        self.assertContains(self.client.get(lista), "1 234.5678")
+
+    def test_parametros_partem_do_padrao_do_pais(self):
+        self.assertEqual(Parametros.da_empresa(None).formato_data, "dd/mm/yyyy")
+        self.assertEqual(Parametros.do_pais("US").separador_decimal, ".")
+        formulario = ParametrosForm(
+            {
+                "empresa": self.empresa.pk,
+                "pais": "US",
+                "casas_decimais_ha": "2",
+                "casas_decimais_volume": "3",
+                "casas_decimais_mdc": "2",
+                "casas_decimais_valor": "2",
+                "casas_decimais_peso": "3",
+                "casas_decimais_porcentagem": "2",
+                "formato_data": "yyyy-mm-dd",
+            }
+        )
+        self.assertTrue(formulario.is_valid(), formulario.errors)
+        parametros = formulario.save()
+        # Campos vazios vêm do país; o que foi ajustado prevalece.
+        self.assertEqual(parametros.simbolo_monetario, "US$")
+        self.assertEqual(parametros.separador_milhar, ",")
+        self.assertEqual(parametros.formato_data, "yyyy-mm-dd")
+
+    def test_parametros_da_filial_usam_os_da_matriz(self):
+        matriz = self.criar_empresa("Matriz Teste", "11222333000181")
+        filial = Empresa(razao_social="Filial Teste", tipo="FILIAL", matriz=matriz)
+        self.assertEqual(Parametros.da_empresa(filial).casas_decimais_ha, 2)
+        Parametros.objects.create(empresa=matriz, casas_decimais_ha=3)
+        self.assertEqual(Parametros.da_empresa(filial).casas_decimais_ha, 3)
+
+    def test_talhoes_do_inventario_informam_area_colhida_e_rendimento(self):
+        inventario = InventarioFlorestal.objects.create(
+            empresa=self.empresa,
+            fazenda=self.fazenda_propria,
+            lote="L8",
+            data_inventario="2026-01-01",
+            responsavel_tecnico="Eng",
+            registro_conselho="CREA",
+            numero_art="A8",
+            area_ha="10",
+            usuario_inclusao=self.gestor,
+            volume_total="1500",
+            numero_arvores="200",
+        )
+        talhao = Talhao.objects.create(
+            empresa=self.empresa,
+            fazenda=self.fazenda_propria,
+            identificacao="T8",
+            area_ha="5",
+        )
+        colheita = Colheita.objects.create(
+            empresa=self.empresa,
+            inventario=inventario,
+            talhao=talhao,
+            etapa="CORTE_FELLER",
+            area_ha=Decimal("2"),
+        )
+        self.client.force_login(self.gestor)
+        url = reverse("talhoes_por_inventario")
+        item = self.client.get(
+            url, {"inventario": inventario.pk, "etapa": "CORTE_FELLER"}
+        ).json()["talhoes"][0]
+        self.assertEqual(Decimal(item["area_colhida_ha"]), Decimal("2"))
+        outra_etapa = self.client.get(
+            url, {"inventario": inventario.pk, "etapa": "ARRASTE"}
+        ).json()["talhoes"][0]
+        self.assertEqual(Decimal(outra_etapa["area_colhida_ha"]), Decimal("0"))
+        # Sem volume no talhão, usa o rendimento do inventário (150 m³/ha).
+        self.assertEqual(Decimal(item["rendimento_m3_ha"]), Decimal("150"))
+        editando = self.client.get(
+            url,
+            {
+                "inventario": inventario.pk,
+                "etapa": "CORTE_FELLER",
+                "colheita": colheita.pk,
+            },
+        ).json()["talhoes"][0]
+        self.assertEqual(Decimal(editando["area_colhida_ha"]), Decimal("0"))
 
     def test_transporte_lenha_calcula_volume_e_custo(self):
         talhao_novo_form = TalhaoGestorForm(empresa=self.empresa)
@@ -2450,7 +3091,7 @@ class ContasPorMatrizTests(TestCase):
         formulario.is_valid()
         self.assertIn("motivo_encerramento", formulario.errors)
 
-    def test_menu_agrupa_por_categoria_conforme_o_perfil(self):
+    def test_menu_em_secoes_e_subsecoes_conforme_o_perfil(self):
         operador = criar_usuario(
             username="op",
             password="x",
@@ -2459,14 +3100,40 @@ class ContasPorMatrizTests(TestCase):
             tipo_usuario="operador",
             primeiro_acesso=False,
         )
+
+        def titulos(menu: list[dict]) -> set[str]:
+            return {
+                item["titulo"]
+                for secao in menu
+                for parte in secao["subsecoes"]
+                for item in parte["itens"]
+            }
+
         self.client.force_login(operador)
-        grupos = {g["titulo"] for g in self.client.get(reverse("inicio")).context["menu"]}
-        self.assertEqual(grupos, {"Florestal", "Produção", "Transporte e vendas"})
+        menu = self.client.get(reverse("inicio")).context["menu"]
+        self.assertEqual(
+            [secao["titulo"] for secao in menu],
+            ["Florestal", "Produção", "Transporte e vendas"],
+        )
+        self.assertIn("Painel dos fornos", titulos(menu))
+        self.assertNotIn("Usuários", titulos(menu))
+        producao = next(secao for secao in menu if secao["chave"] == "producao")
+        # O operador lança e consulta, mas não mexe nos cadastros da produção.
+        self.assertEqual(
+            [parte["titulo"] for parte in producao["subsecoes"]],
+            ["Lançamentos", "Relatórios"],
+        )
 
         self.client.force_login(self.admin_a)
         self.client.post(reverse("selecionar_empresa"), {"empresa": self.filial_a1.pk})
         resposta = self.client.get(reverse("lista_registros", args=["fornos"]))
         menu = resposta.context["menu"]
-        self.assertIn("Configurações", {g["titulo"] for g in menu})
-        abertos = [g["titulo"] for g in menu if g["aberto"]]
-        self.assertEqual(abertos, ["Produção"])
+        self.assertIn("Configurações", [secao["titulo"] for secao in menu])
+        self.assertEqual([secao["titulo"] for secao in menu if secao["ativa"]], ["Produção"])
+        producao = next(secao for secao in menu if secao["chave"] == "producao")
+        self.assertEqual(
+            [parte["titulo"] for parte in producao["subsecoes"]],
+            ["Cadastros", "Lançamentos", "Relatórios"],
+        )
+        self.assertContains(resposta, 'href="#icone-forno"')
+        self.assertContains(resposta, "data-menu-recolher")

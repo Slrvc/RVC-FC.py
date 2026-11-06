@@ -3,20 +3,43 @@
 {% block content %}
   <div class="page-heading">
     <div>
-      <p class="eyebrow">Cadastros</p>
+      <p class="eyebrow">{{ local_no_menu|default:"Cadastros" }}</p>
       <h1>{{ titulo }}</h1>
       <p class="page-description">{% if consulta_de_encerrada %}Consulta dos registros da empresa encerrada.{% elif somente_leitura %}Dados sincronizados da API oficial do IBGE.{% else %}Consulte e mantenha os registros do sistema.{% endif %}</p>
     </div>
-    {% if not somente_leitura %}<a class="button" href="{% url 'novo_registro' recurso %}"><span aria-hidden="true">＋</span> Novo cadastro</a>{% endif %}
+    {% if not somente_leitura %}
+      {% if recurso == "ciclos-forno" %}
+        <div class="heading-actions">
+          <a class="button" href="{% url 'novo_registro' recurso %}">1. Data Enchimento</a>
+          <a class="button" href="{% url 'etapa_do_ciclo' 'fim-carbonizacao' %}">2. Data Resfriamento</a>
+          <a class="button" href="{% url 'etapa_do_ciclo' 'descarga' %}">3. Descarga</a>
+          <a class="button button-secondary" href="{% url 'painel_fornos' %}">Painel</a>
+        </div>
+      {% elif recurso == "colheitas" %}
+        <div class="heading-actions">
+          <a class="button button-secondary" href="{% url 'consolidado_colheita' %}">Consolidado por talhão</a>
+          <a class="button" href="{% url 'novo_registro' recurso %}"><span aria-hidden="true">＋</span> Lançar colheita</a>
+        </div>
+      {% else %}<a class="button" href="{% url 'novo_registro' recurso %}"><span aria-hidden="true">＋</span> Novo cadastro</a>{% endif %}
+    {% endif %}
   </div>
   {% if consulta_de_encerrada %}
     <div class="flash-message" role="status">{{ empresa_ativa }} está encerrada{% if empresa_ativa.data_encerramento %} desde {{ empresa_ativa.data_encerramento|date:"d/m/Y" }}{% endif %}: os registros ficam disponíveis só para consulta.</div>
+  {% endif %}
+  {% if filtro %}
+    <nav class="filtro-rapido" aria-label="Filtrar por status">
+      <a href="{{ filtro.todos.url }}"{% if not filtro.ativo %} aria-current="page"{% endif %}>Todos <span>{{ filtro.todos.total }}</span></a>
+      {% for opcao in filtro.opcoes %}
+        <a href="{{ opcao.url }}"{% if filtro.ativo == opcao.valor %} aria-current="page"{% endif %}>{{ opcao.rotulo }} <span>{{ opcao.total }}</span></a>
+      {% endfor %}
+    </nav>
   {% endif %}
   <section class="panel" aria-label="Lista de {{ titulo|lower }}">
     <div class="list-toolbar">
       <form class="search-form" method="get" role="search">
         <label class="sr-only" for="busca-registros">Buscar em {{ titulo|lower }}</label>
         <input class="search-input" id="busca-registros" type="search" name="q" value="{{ termo }}" placeholder="Buscar por nome, código ou cidade">
+        {% if filtro.ativo %}<input type="hidden" name="filtro" value="{{ filtro.ativo }}">{% endif %}
         <button class="button button-secondary" type="submit">Buscar</button>
       </form>
       <p class="result-count">
@@ -51,12 +74,12 @@
         <span class="pagination-summary">Página {{ pagina.number }} de {{ pagina.paginator.num_pages }}</span>
         <div class="pagination-links">
           {% if pagina.has_previous %}
-            <a class="page-link" href="?{% if termo %}q={{ termo|urlencode }}&amp;{% endif %}page={{ pagina.previous_page_number }}" aria-label="Página anterior">← Anterior</a>
+            <a class="page-link" href="?{% if termo %}q={{ termo|urlencode }}&amp;{% endif %}{% if filtro.ativo %}filtro={{ filtro.ativo|urlencode }}&amp;{% endif %}page={{ pagina.previous_page_number }}" aria-label="Página anterior">← Anterior</a>
           {% else %}
             <span class="page-link is-disabled" aria-hidden="true">← Anterior</span>
           {% endif %}
           {% if pagina.has_next %}
-            <a class="page-link" href="?{% if termo %}q={{ termo|urlencode }}&amp;{% endif %}page={{ pagina.next_page_number }}" aria-label="Próxima página">Próxima →</a>
+            <a class="page-link" href="?{% if termo %}q={{ termo|urlencode }}&amp;{% endif %}{% if filtro.ativo %}filtro={{ filtro.ativo|urlencode }}&amp;{% endif %}page={{ pagina.next_page_number }}" aria-label="Próxima página">Próxima →</a>
           {% else %}
             <span class="page-link is-disabled" aria-hidden="true">Próxima →</span>
           {% endif %}

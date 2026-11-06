@@ -4,11 +4,11 @@
   <div class="page-heading">
     <div>
       <p class="eyebrow"><a href="{% url 'lista_registros' recurso %}">{{ titulo }}</a></p>
-      <h1>{% if novo %}Novo cadastro{% else %}Editar cadastro{% endif %}</h1>
-      <p class="page-description">Preencha as informações abaixo para {% if novo %}adicionar um registro{% else %}atualizar este registro{% endif %}.</p>
+      <h1>{% if cabecalho %}{{ cabecalho }}{% elif novo %}{% if recurso == "ciclos-forno" %}Enchimento de forno{% else %}Novo cadastro{% endif %}{% else %}Editar cadastro{% endif %}</h1>
+      <p class="page-description">{% if cabecalho %}Escolha o forno e informe os dados desta etapa.{% else %}Preencha as informações abaixo para {% if novo %}adicionar um registro{% else %}atualizar este registro{% endif %}.{% endif %}</p>
     </div>
   </div>
-  <form class="panel form-panel" method="post" data-rascunho data-municipios-url="{% url 'municipios_por_estado' %}" data-plantios-url="{% url 'plantios_por_fazenda' %}"{% if recurso == "inventarios-talhao" %} data-talhoes-url="{% url 'talhoes_por_inventario' %}"{% endif %}>
+  <form class="panel form-panel" method="post" data-rascunho data-municipios-url="{% url 'municipios_por_estado' %}" data-plantios-url="{% url 'plantios_por_fazenda' %}"{% if recurso == "inventarios-talhao" %} data-talhoes-url="{% url 'talhoes_por_inventario' %}"{% elif recurso == "colheitas" %} data-colheita-talhoes-url="{% url 'talhoes_por_inventario' %}" data-tarifa-url="{% url 'tarifa_vigente' %}" data-fator-mst="{{ fator_mst_por_m3|stringformat:'s' }}"{% if pk %} data-colheita="{{ pk }}"{% endif %}{% endif %}>
     {% csrf_token %}
     {% if formulario.non_field_errors %}<div class="error-list" role="alert">{{ formulario.non_field_errors }}</div>{% endif %}
     {% for secao in formulario.secoes %}
@@ -25,13 +25,15 @@
               {% if field.name == "municipio" %}<span class="field-status" id="municipio-status" aria-live="polite"></span>{% endif %}
               {% if field.name == "plantio" %}<span class="field-status" id="plantio-status" aria-live="polite"></span>{% endif %}
               {% if field.name == "talhao" and recurso == "inventarios-talhao" %}<span class="field-status" id="talhao-status" aria-live="polite"></span>{% endif %}
+              {% if recurso == "colheitas" and field.name == "talhao" %}<span class="field-status" id="colheita-talhao-resumo" aria-live="polite"></span>{% endif %}
+              {% if recurso == "colheitas" and field.name == "valor_unitario" %}<span class="field-status" id="colheita-valor-total" aria-live="polite"></span>{% endif %}
             </div>
           {% endfor %}
         </div>
       </fieldset>
     {% endfor %}
     <div class="form-actions">
-      <button class="button" type="submit">{% if novo %}Salvar cadastro{% else %}Salvar alterações{% endif %}</button>
+      <button class="button" type="submit">{% if rotulo_salvar %}{{ rotulo_salvar }}{% elif novo and recurso == "ciclos-forno" %}Lançar enchimento{% elif novo %}Salvar cadastro{% else %}Salvar alterações{% endif %}</button>
       <a class="button button-secondary" href="{% url 'lista_registros' recurso %}">Cancelar</a>
       {% if pode_excluir and not novo %}<a class="button button-danger form-actions-end" href="{% url 'excluir_registro' recurso pk %}">Excluir</a>{% endif %}
     </div>

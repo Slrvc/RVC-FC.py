@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from datetime import date, timedelta
 from decimal import Decimal
 
 from django.conf import settings
 from django.contrib.auth.models import AbstractUser, UserManager
 from django.db import models, transaction
 from django.db.models.functions import Coalesce
+from django.utils import timezone
+from django.utils.html import format_html
 
 FATOR_MST_POR_M3 = Decimal("1.5")
 
@@ -262,16 +265,63 @@ class Idioma(models.IntegerChoices):
     INGLES = 2, "Inglês (Estados Unidos)"
 
 
+class Pais(models.TextChoices):
+    BRASIL = "BR", "Brasil"
+    PORTUGAL = "PT", "Portugal"
+    ESTADOS_UNIDOS = "US", "Estados Unidos"
+
+
+# Formatos de cada país; os parâmetros partem deles e podem ser ajustados.
+PADROES_POR_PAIS = {
+    Pais.BRASIL: {
+        "idioma": 1,
+        "simbolo_monetario": "R$",
+        "separador_milhar": ".",
+        "separador_decimal": ",",
+        "formato_data": "dd/mm/yyyy",
+        "formato_hora": "hh:mm",
+        "formato_hora_extenso": "hh:mm:ss",
+    },
+    Pais.PORTUGAL: {
+        "idioma": 1,
+        "simbolo_monetario": "€",
+        "separador_milhar": " ",
+        "separador_decimal": ",",
+        "formato_data": "dd/mm/yyyy",
+        "formato_hora": "hh:mm",
+        "formato_hora_extenso": "hh:mm:ss",
+    },
+    Pais.ESTADOS_UNIDOS: {
+        "idioma": 2,
+        "simbolo_monetario": "US$",
+        "separador_milhar": ",",
+        "separador_decimal": ".",
+        "formato_data": "mm/dd/yyyy",
+        "formato_hora": "hh:mm",
+        "formato_hora_extenso": "hh:mm:ss",
+    },
+}
+
+
 class Parametros(RegistroAuditavel):
+    """Parâmetros do sistema: formatação de números, datas e valores.
+
+    Sem registro vale o padrão do Brasil. Com registro, parte do padrão do país
+    escolhido e cada formato pode ser ajustado. A filial sem registro usa o da
+    matriz.
+    """
+
     codigo = models.BigAutoField(primary_key=True)
-    empresa = models.ForeignKey(
+    empresa = models.OneToOneField(
         Empresa, on_delete=models.CASCADE, related_name="parametros"
+    )
+    pais = models.CharField(
+        "País", max_length=2, choices=Pais.choices, default=Pais.BRASIL
     )
     idioma = models.PositiveSmallIntegerField(
         choices=Idioma.choices, default=Idioma.PORTUGUES
     )
-    terminal = models.CharField(max_length=20, unique=True, default="0")
-    simbolo_monetario = models.CharField(max_length=2, default="R$")
+    simbolo_monetario = models.CharField(max_length=3, default="R$")
     separador_milhar = models.CharField(max_length=1, default=".")
     separador_decimal = models.CharField(max_length=1, default=",")
     separador_data = models.CharField(max_length=1, default="/")
@@ -280,19 +330,37 @@ class Parametros(RegistroAuditavel):
     formato_data_extenso = models.CharField(max_length=30, blank=True)
     formato_hora = models.CharField(max_length=10, default="hh:mm")
     formato_hora_extenso = models.CharField(max_length=10, default="hh:mm:ss")
-    casas_decimais_ha = models.PositiveSmallIntegerField(default=4)
-    casas_decimais_mdc = models.PositiveSmallIntegerField(default=3)
+    casas_decimais_ha = models.PositiveSmallIntegerField(default=2)
+    casas_decimais_volume = models.PositiveSmallIntegerField(default=3)
+    casas_decimais_mdc = models.PositiveSmallIntegerField(default=2)
     casas_decimais_valor = models.PositiveSmallIntegerField(default=2)
     casas_decimais_peso = models.PositiveSmallIntegerField(default=3)
     casas_decimais_porcentagem = models.PositiveSmallIntegerField(default=2)
 
     class Meta:
-        ordering = ["empresa", "terminal"]
-        verbose_name = "parâmetro"
-        verbose_name_plural = "parâmetros"
+        ordering = ["empresa"]
+        verbose_name = "parâmetro do sistema"
+        verbose_name_plural = "parâmetros do sistema"
 
     def __str__(self) -> str:
-        return f"{self.empresa} ({self.terminal})"
+        return f"Parâmetros do sistema - {self.empresa}"
+
+    @classmethod
+    def da_empresa(cls, empresa: Empresa | None) -> Parametros:
+        """Os da empresa, senão os da matriz, senão os padrões."""
+        if empresa is not None:
+            for codigo in (empresa.pk, empresa.matriz_id):
+                if codigo is None:
+                    continue
+                encontrado = cls.objects.filter(empresa_id=codigo).first()
+                if encontrado is not None:
+                    return encontrado
+        return cls.do_pais(Pais.BRASIL)
+
+    @classmethod
+    def do_pais(cls, pais: str) -> Parametros:
+        """Parâmetros (não gravados) com os formatos padrão do país."""
+        return cls(pais=pais, **PADROES_POR_PAIS[Pais(pais)])
 
 
 class ControleEstoqueTalhao(models.TextChoices):
@@ -360,6 +428,9 @@ class Proprietario(RegistroAuditavel):
     )
     nome_razao_social = models.CharField(max_length=150)
     cpf_cnpj = models.CharField("CPF/CNPJ", max_length=18)
+    inscricao_estadual = models.CharField(
+        "Inscrição estadual", max_length=20, blank=True
+    )
     endereco = models.CharField(max_length=150, blank=True)
     bairro = models.CharField(max_length=60, blank=True)
     municipio = models.ForeignKey(
@@ -421,6 +492,68 @@ class Fazenda(RegistroAuditavel):
         return self.nome
 
 
+class SistemaColheita(models.TextChoices):
+    MECANIZADA = "MECANIZADA", "Mecanizada"
+    MANUAL = "MANUAL", "Manual"
+
+
+class EtapaColheita(models.TextChoices):
+    CORTE_FELLER = "CORTE_FELLER", "Corte/derrubada (feller)"
+    ARRASTE = "ARRASTE", "Arraste (skidder)"
+    TRACAMENTO = "TRACAMENTO", "Traçamento (garra traçadora)"
+    CORTE_MOTOSSERRA = "CORTE_MOTOSSERRA", "Corte (motosserra)"
+    EMBANDEIRAMENTO = "EMBANDEIRAMENTO", "Embandeiramento"
+
+
+ETAPAS_POR_SISTEMA = {
+    SistemaColheita.MECANIZADA: (
+        EtapaColheita.CORTE_FELLER,
+        EtapaColheita.ARRASTE,
+        EtapaColheita.TRACAMENTO,
+    ),
+    SistemaColheita.MANUAL: (
+        EtapaColheita.CORTE_MOTOSSERRA,
+        EtapaColheita.EMBANDEIRAMENTO,
+    ),
+}
+SISTEMA_DA_ETAPA = {
+    etapa: sistema for sistema, etapas in ETAPAS_POR_SISTEMA.items() for etapa in etapas
+}
+
+
+class TipoServico(models.TextChoices):
+    """Serviços que um fornecedor presta; as etapas da colheita vêm primeiro."""
+
+    CORTE_FELLER = EtapaColheita.CORTE_FELLER.value, EtapaColheita.CORTE_FELLER.label
+    ARRASTE = EtapaColheita.ARRASTE.value, EtapaColheita.ARRASTE.label
+    TRACAMENTO = EtapaColheita.TRACAMENTO.value, EtapaColheita.TRACAMENTO.label
+    CORTE_MOTOSSERRA = (
+        EtapaColheita.CORTE_MOTOSSERRA.value,
+        EtapaColheita.CORTE_MOTOSSERRA.label,
+    )
+    EMBANDEIRAMENTO = (
+        EtapaColheita.EMBANDEIRAMENTO.value,
+        EtapaColheita.EMBANDEIRAMENTO.label,
+    )
+    TRANSPORTE_LENHA = "TRANSPORTE_LENHA", "Transporte de lenha"
+    CARBONIZACAO = "CARBONIZACAO", "Carbonização (produção de carvão)"
+    FRETE_CARVAO = "FRETE_CARVAO", "Expedição (frete de carvão)"
+    OUTRO = "OUTRO", "Outro"
+
+
+class UnidadeTarifa(models.TextChoices):
+    M3 = "M3", "m³"
+    MST = "MST", "MST"
+    HA = "HA", "Hectare"
+    MDC = "MDC", "MDC"
+    TONELADA = "TONELADA", "Tonelada"
+    VIAGEM = "VIAGEM", "Viagem"
+    KM = "KM", "Km"
+
+
+UNIDADES_DA_COLHEITA = (UnidadeTarifa.M3, UnidadeTarifa.MST, UnidadeTarifa.HA)
+
+
 class Fornecedor(RegistroAuditavel):
     codigo = models.BigAutoField(primary_key=True)
     empresa = models.ForeignKey(
@@ -428,6 +561,9 @@ class Fornecedor(RegistroAuditavel):
     )
     nome_razao_social = models.CharField(max_length=150)
     cpf_cnpj = models.CharField("CPF/CNPJ", max_length=18)
+    inscricao_estadual = models.CharField(
+        "Inscrição estadual", max_length=20, blank=True
+    )
     endereco = models.CharField(max_length=150, blank=True)
     bairro = models.CharField(max_length=60, blank=True)
     municipio = models.ForeignKey(
@@ -469,6 +605,54 @@ class Fornecedor(RegistroAuditavel):
             if ativo
         ]
         return ", ".join(nomes) or "-"
+
+
+class FornecedorTarifa(RegistroAuditavel):
+    """Valor combinado com o fornecedor por serviço e unidade, com vigência."""
+
+    codigo = models.BigAutoField(primary_key=True)
+    empresa = models.ForeignKey(
+        Empresa, on_delete=models.PROTECT, related_name="tarifas_fornecedor"
+    )
+    fornecedor = models.ForeignKey(
+        Fornecedor, on_delete=models.CASCADE, related_name="tarifas"
+    )
+    tipo_servico = models.CharField(max_length=20, choices=TipoServico.choices)
+    unidade = models.CharField(max_length=10, choices=UnidadeTarifa.choices)
+    valor = models.DecimalField(max_digits=12, decimal_places=4)
+    vigencia_inicio = models.DateField()
+    vigencia_fim = models.DateField(null=True, blank=True)
+    observacao = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        ordering = ["fornecedor__nome_razao_social", "tipo_servico", "-vigencia_inicio"]
+        verbose_name = "tarifa de fornecedor"
+        verbose_name_plural = "tarifas de fornecedor"
+
+    def __str__(self) -> str:
+        return (
+            f"{self.fornecedor} - {self.get_tipo_servico_display()} "
+            f"({self.get_unidade_display()})"
+        )
+
+    @classmethod
+    def vigente(
+        cls, fornecedor_id: int | None, tipo_servico: str, data
+    ) -> FornecedorTarifa | None:
+        if not fornecedor_id or not tipo_servico or data is None:
+            return None
+        return (
+            cls.objects.filter(
+                fornecedor_id=fornecedor_id,
+                tipo_servico=tipo_servico,
+                vigencia_inicio__lte=data,
+            )
+            .filter(
+                models.Q(vigencia_fim__isnull=True) | models.Q(vigencia_fim__gte=data)
+            )
+            .order_by("-vigencia_inicio")
+            .first()
+        )
 
 
 class OrigemFloresta(models.TextChoices):
@@ -586,6 +770,12 @@ class Talhao(RegistroAuditavel):
         return self.volume_m3 - self.volume_retirado_m3
 
 
+class RegimeSabado(models.TextChoices):
+    TODOS = "TODOS", "Trabalha todo sábado"
+    ALTERNADO = "ALTERNADO", "Um sábado sim, outro não"
+    NENHUM = "NENHUM", "Não trabalha aos sábados"
+
+
 class UPC(RegistroAuditavel):
     codigo = models.BigAutoField(primary_key=True)
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="upcs")
@@ -596,6 +786,16 @@ class UPC(RegistroAuditavel):
     utm_norte = models.DecimalField(max_digits=12, decimal_places=2)
     utm_fuso = models.CharField(max_length=4, blank=True)
     ciclo_producao_dias = models.PositiveIntegerField()
+    regime_sabado = models.CharField(
+        "Sábados",
+        max_length=10,
+        choices=RegimeSabado.choices,
+        default=RegimeSabado.TODOS,
+    )
+    sabado_referencia = models.DateField(
+        "Sábado trabalhado de referência", null=True, blank=True
+    )
+    trabalha_domingo = models.BooleanField("Trabalha aos domingos", default=False)
     observacao = models.CharField(max_length=255, blank=True)
 
     class Meta:
@@ -610,6 +810,26 @@ class UPC(RegistroAuditavel):
 
     def __str__(self) -> str:
         return self.nome
+
+    def dia_de_trabalho(self, dia: date) -> bool:
+        """Enchimento e descarga só acontecem nos dias de trabalho da UPC."""
+        semana = dia.weekday()
+        if semana == 6:
+            return self.trabalha_domingo
+        if semana != 5:
+            return True
+        if self.regime_sabado == RegimeSabado.NENHUM:
+            return False
+        if self.regime_sabado == RegimeSabado.ALTERNADO and self.sabado_referencia:
+            return (dia - self.sabado_referencia).days % 14 == 0
+        return True
+
+    def proximo_dia_de_trabalho(self, dia: date) -> date:
+        for _ in range(60):
+            if self.dia_de_trabalho(dia):
+                return dia
+            dia += timedelta(days=1)
+        return dia
 
     def _fornos_em_uso(self) -> models.QuerySet[Forno]:
         if not self.pk:
@@ -651,6 +871,11 @@ class NivelMecanizacao(models.TextChoices):
     MECANIZADO = "MECANIZADO", "Mecanizado"
 
 
+DIAS_CARBONIZACAO_PADRAO = 6
+DIAS_RESFRIAMENTO_PADRAO = 6
+DIAS_VAZIO_PADRAO = 0
+
+
 class TipoForno(RegistroAuditavel):
     """Modelo de forno (DCF 7.3 a 7.5)."""
 
@@ -687,6 +912,20 @@ class TipoForno(RegistroAuditavel):
     capacidade_mdc = models.DecimalField(max_digits=10, decimal_places=2)
     capacidade_lenha_mst = models.DecimalField(
         max_digits=10, decimal_places=3, null=True, blank=True
+    )
+    dias_carbonizacao_previstos = models.PositiveSmallIntegerField(
+        "Carbonização prevista (dias)", default=DIAS_CARBONIZACAO_PADRAO
+    )
+    dias_resfriamento_previstos = models.PositiveSmallIntegerField(
+        "Resfriamento previsto (dias)", default=DIAS_RESFRIAMENTO_PADRAO
+    )
+    dias_vazio_previstos = models.PositiveSmallIntegerField(
+        "Dias vazio mínimos entre ciclos",
+        default=DIAS_VAZIO_PADRAO,
+        help_text=(
+            "0: carrega no próximo dia de trabalho depois da descarga. Domingos "
+            "e sábados de folga já deixam o forno vazio."
+        ),
     )
     observacao = models.CharField(max_length=255, blank=True)
 
@@ -734,12 +973,24 @@ class Forno(RegistroAuditavel):
         verbose_name_plural = "fornos"
         constraints = [
             models.UniqueConstraint(
-                fields=["upc", "numero"], name="forno_numero_por_upc"
+                fields=["upc", "tipo_forno", "numero"],
+                name="forno_numero_por_upc_e_tipo",
             )
         ]
 
     def __str__(self) -> str:
-        return f"{self.upc} - {self.numero}"
+        return f"{self.upc} - {self.identificacao}"
+
+    @property
+    def identificacao(self) -> str:
+        """Nome do tipo + número (ex.: FCM 01); número com letras fica como está."""
+        if self.numero.isdigit() and self.tipo_forno_id:
+            return f"{self.tipo_forno.nome} {self.numero}"
+        return self.numero
+
+    @property
+    def formato(self) -> str:
+        return self.tipo_forno.get_formato_display()
 
     @property
     def capacidade_efetiva_mdc(self) -> Decimal:
@@ -912,34 +1163,6 @@ class UnidadeVolume(models.TextChoices):
     MDC = "MDC", "MDC"
     MST = "MST", "MST"
     M3 = "M3", "m³"
-
-
-class SistemaColheita(models.TextChoices):
-    MECANIZADA = "MECANIZADA", "Mecanizada"
-    MANUAL = "MANUAL", "Manual"
-
-
-class EquipamentoColheita(models.TextChoices):
-    HARVESTER = "HARVESTER", "Harvester"
-    FELLER = "FELLER", "Feller"
-    SKIDDER = "SKIDDER", "Skidder"
-    GARRA_TRACADORA = "GARRA_TRACADORA", "Garra traçadora"
-    MOTOSSERRA = "MOTOSSERRA", "Motosserra"
-    BALDEIO_MANUAL = "BALDEIO_MANUAL", "Baldeio manual"
-
-
-EQUIPAMENTOS_POR_SISTEMA = {
-    SistemaColheita.MECANIZADA: (
-        EquipamentoColheita.HARVESTER,
-        EquipamentoColheita.FELLER,
-        EquipamentoColheita.SKIDDER,
-        EquipamentoColheita.GARRA_TRACADORA,
-    ),
-    SistemaColheita.MANUAL: (
-        EquipamentoColheita.MOTOSSERRA,
-        EquipamentoColheita.BALDEIO_MANUAL,
-    ),
-}
 
 
 class StatusAutorizacao(models.TextChoices):
@@ -1246,6 +1469,14 @@ class StatusCiclo(models.TextChoices):
     CANCELADO = "CANCELADO", "Cancelado"
 
 
+# Mesmas letras e textos da legenda do painel dos fornos.
+LEGENDA_DO_STATUS = {
+    StatusCiclo.ENCHIMENTO: ("L", "Enchido, aguardando acendimento"),
+    StatusCiclo.CARBONIZACAO: ("C", "Carbonizando"),
+    StatusCiclo.RESFRIAMENTO: ("R", "Resfriando"),
+    StatusCiclo.DESCARREGADO: ("D", "Descarga"),
+}
+
 STATUS_CICLO_ATIVO = (
     StatusCiclo.ENCHIMENTO,
     StatusCiclo.CARBONIZACAO,
@@ -1373,6 +1604,75 @@ class CicloForno(RegistroAuditavel):
             return StatusCiclo.CARBONIZACAO
         return StatusCiclo.ENCHIMENTO
 
+    @property
+    def prevista_fim_carbonizacao(self):
+        dias = self.forno.tipo_forno.dias_carbonizacao_previstos
+        inicio = self.data_acendimento or self.data_inicio_enchimento
+        return inicio + timedelta(days=dias)
+
+    @property
+    def prevista_descarga(self):
+        if self.data_fim_carbonizacao is None:
+            return None
+        dias = self.forno.tipo_forno.dias_resfriamento_previstos
+        return self.data_fim_carbonizacao + timedelta(days=dias)
+
+    @property
+    def prevista_da_etapa(self):
+        """Quando a etapa atual deve terminar (vazio se o ciclo terminou)."""
+        if self.status == StatusCiclo.CARBONIZACAO:
+            return self.prevista_fim_carbonizacao
+        if self.status == StatusCiclo.RESFRIAMENTO:
+            return self.prevista_descarga
+        return None
+
+    @property
+    def alerta_prazo(self) -> str:
+        """ATENÇÃO quando uma etapa passou (ou está passando) do prazo do tipo."""
+        agora = timezone.now()
+        etapas = (
+            (
+                self.prevista_fim_carbonizacao,
+                self.data_fim_carbonizacao,
+                "Carbonização",
+            ),
+            (self.prevista_descarga, self.data_descarga, "Resfriamento"),
+        )
+        for prevista, realizada, nome in etapas:
+            if prevista is None or self.status == StatusCiclo.CANCELADO:
+                continue
+            if (realizada or agora) > prevista:
+                return f"ATENÇÃO: {nome.lower()} passou do prazo"
+        return ""
+
+    @property
+    def status_legenda(self) -> str:
+        """Status com a marca e o texto da legenda do painel dos fornos."""
+        codigo, texto = LEGENDA_DO_STATUS.get(
+            self.status, ("", self.get_status_display())
+        )
+        if not codigo:
+            return texto
+        return format_html(
+            '<span class="estado-celula estado-{}" aria-hidden="true">{}</span> {}',
+            codigo,
+            codigo,
+            texto,
+        )
+
+    @property
+    def prazo_curto(self) -> str:
+        """Alerta de prazo resumido, para a coluna da lista."""
+        alerta = self.alerta_prazo
+        if not alerta:
+            return ""
+        texto = (
+            "Resfriamento atrasado"
+            if "resfriamento" in alerta
+            else "Carbonização atrasada"
+        )
+        return format_html('<span class="prazo-atrasado">⚠ {}</span>', texto)
+
     def proximo_numero_ciclo(self) -> int:
         ultimo = CicloForno.objects.filter(forno_id=self.forno_id).aggregate(
             maior=models.Max("numero_ciclo")
@@ -1395,6 +1695,19 @@ class CicloForno(RegistroAuditavel):
             return "Consumo de lenha abaixo do ideal"
         return ""
 
+    @property
+    def forno_curto(self) -> str:
+        return self.forno.identificacao
+
+    @property
+    def alerta_fator_curto(self) -> str:
+        """Alerta de consumo de lenha em etiqueta, para a coluna da lista."""
+        alerta = self.alerta_fator
+        if not alerta:
+            return ""
+        texto = "Lenha acima do ideal" if "acima" in alerta else "Lenha abaixo do ideal"
+        return format_html('<span class="alerta-fator">⚠ {}</span>', texto)
+
     def save(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
         if not self.numero_ciclo:
             self.numero_ciclo = self.proximo_numero_ciclo()
@@ -1402,6 +1715,21 @@ class CicloForno(RegistroAuditavel):
             self.fator_conversao = ParametroEmpresa.da_empresa(
                 self.empresa_id
             ).fator_mst_por_m3
+        # Em geral o forno é aceso ao terminar o enchimento; em branco, é a mesma
+        # data e hora.
+        if self.data_acendimento is None:
+            self.data_acendimento = self.data_inicio_enchimento
+        if (
+            self.tipo_execucao == TipoExecucao.TERCEIRIZADA
+            and self.valor_mdc is None
+        ):
+            tarifa = FornecedorTarifa.vigente(
+                self.fornecedor_id,
+                TipoServico.CARBONIZACAO,
+                timezone.localdate(self.data_inicio_enchimento),
+            )
+            if tarifa is not None and tarifa.unidade == UnidadeTarifa.MDC:
+                self.valor_mdc = tarifa.valor
         self.status = self.status_pelas_datas()
         self.dias_carbonizacao = _dias_entre(
             self.data_acendimento, self.data_fim_carbonizacao
@@ -1434,7 +1762,62 @@ class CicloForno(RegistroAuditavel):
         super().save(*args, **kwargs)
 
 
+class PlanejamentoForno(RegistroAuditavel):
+    """Planejado (PL) de um forno no mês.
+
+    Guarda o primeiro enchimento previsto no mês; a partir dele os ciclos são
+    projetados pelos prazos do tipo do forno (carbonização, resfriamento e
+    dias vazio até o novo enchimento).
+    """
+
+    codigo = models.BigAutoField(primary_key=True)
+    empresa = models.ForeignKey(
+        Empresa, on_delete=models.PROTECT, related_name="planejamentos_forno"
+    )
+    forno = models.ForeignKey(
+        Forno, on_delete=models.CASCADE, related_name="planejamentos"
+    )
+    mes = models.DateField("Mês", editable=False)
+    data_primeiro_enchimento = models.DateField("Primeiro enchimento previsto")
+    mdc_previsto = models.DecimalField(
+        "MDC previsto por ciclo",
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    observacao = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        ordering = ["-mes", "forno__upc__nome", "forno__numero"]
+        verbose_name = "planejamento de forno"
+        verbose_name_plural = "planejamentos de forno"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["forno", "mes"], name="planejamento_forno_por_mes"
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.forno} - {self.mes:%m/%Y}"
+
+    @property
+    def mdc_por_ciclo(self) -> Decimal:
+        return self.mdc_previsto or self.forno.capacidade_efetiva_mdc
+
+    def save(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        self.mes = self.data_primeiro_enchimento.replace(day=1)
+        super().save(*args, **kwargs)
+
+
 class Colheita(RegistroAuditavel):
+    """Lançamento diário de uma etapa da colheita num talhão.
+
+    O lançamento do dia é o volume (m³) feito na etapa; o pagamento costuma ser
+    por área, estimada por volume ÷ rendimento (m³/ha) quando não informada.
+    Por etapa, a soma dos volumes não passa do volume inventariado do talhão.
+    """
+
     codigo = models.BigAutoField(primary_key=True)
     empresa = models.ForeignKey(
         Empresa, on_delete=models.PROTECT, related_name="colheitas"
@@ -1442,12 +1825,9 @@ class Colheita(RegistroAuditavel):
     inventario = models.ForeignKey(
         InventarioFlorestal, on_delete=models.PROTECT, related_name="colheitas"
     )
-    sistema = models.CharField(
-        max_length=12,
-        choices=SistemaColheita.choices,
-        default=SistemaColheita.MECANIZADA,
+    talhao = models.ForeignKey(
+        Talhao, on_delete=models.PROTECT, related_name="colheitas"
     )
-    equipamentos = models.JSONField(default=list, blank=True)
     autorizacao = models.ForeignKey(
         AutorizacaoAmbiental,
         on_delete=models.PROTECT,
@@ -1455,8 +1835,22 @@ class Colheita(RegistroAuditavel):
         null=True,
         blank=True,
     )
-    talhao = models.ForeignKey(
-        Talhao,
+    etapa = models.CharField(
+        max_length=20,
+        choices=EtapaColheita.choices,
+        default=EtapaColheita.CORTE_FELLER,
+    )
+    sistema = models.CharField(
+        max_length=12,
+        choices=SistemaColheita.choices,
+        default=SistemaColheita.MECANIZADA,
+        editable=False,
+    )
+    tipo_execucao = models.CharField(
+        max_length=15, choices=TipoExecucao.choices, default=TipoExecucao.TERCEIRIZADA
+    )
+    fornecedor = models.ForeignKey(
+        Fornecedor,
         on_delete=models.PROTECT,
         related_name="colheitas",
         null=True,
@@ -1464,15 +1858,39 @@ class Colheita(RegistroAuditavel):
     )
     data_inicio = models.DateField(null=True, blank=True)
     data_fim = models.DateField(null=True, blank=True)
-    area_ha = models.DecimalField(max_digits=12, decimal_places=4)
+    area_ha = models.DecimalField(
+        max_digits=12, decimal_places=4, null=True, blank=True
+    )
+    rendimento_m3_ha = models.DecimalField(
+        "Rendimento (m³/ha)",
+        max_digits=12,
+        decimal_places=3,
+        null=True,
+        editable=False,
+    )
+    volume_m3 = models.DecimalField(
+        "Volume colhido (m³)",
+        max_digits=14,
+        decimal_places=3,
+        null=True,
+        blank=True,
+    )
+    unidade_pagamento = models.CharField(
+        max_length=10,
+        choices=[(u.value, u.label) for u in UNIDADES_DA_COLHEITA],
+        default=UnidadeTarifa.HA,
+    )
+    valor_unitario = models.DecimalField(
+        max_digits=12, decimal_places=4, null=True, blank=True
+    )
+    valor_total = models.DecimalField(
+        "Valor a pagar", max_digits=14, decimal_places=2, null=True, editable=False
+    )
     latitude = models.DecimalField(
         max_digits=10, decimal_places=7, null=True, blank=True
     )
     longitude = models.DecimalField(
         max_digits=10, decimal_places=7, null=True, blank=True
-    )
-    volume_total = models.DecimalField(
-        max_digits=14, decimal_places=3, editable=False, default=0
     )
     observacao = models.CharField(max_length=255, blank=True)
 
@@ -1480,29 +1898,106 @@ class Colheita(RegistroAuditavel):
         ordering = ["-data_inicio", "-codigo"]
         verbose_name = "colheita"
         verbose_name_plural = "colheitas"
-        constraints = [
-            models.UniqueConstraint(
-                fields=["inventario"], name="colheita_unica_por_inventario"
-            )
-        ]
 
     def __str__(self) -> str:
-        return f"{self.inventario} - {self.talhao or 'sem talhão'}"
+        return f"{self.talhao} - {self.get_etapa_display()}"
 
-    def lista_equipamentos(self) -> str:
-        return ", ".join(EquipamentoColheita(item).label for item in self.equipamentos)
+    @staticmethod
+    def rendimento_do_talhao(
+        talhao: Talhao, inventario: InventarioFlorestal | None = None
+    ) -> Decimal | None:
+        """m³/ha: inventário do talhão, senão volume do talhão, senão inventário."""
+        if inventario is not None:
+            por_talhao = (
+                InventarioTalhao.objects.filter(inventario=inventario, talhao=talhao)
+                .values_list("volume_ha", flat=True)
+                .first()
+            )
+            if por_talhao:
+                return por_talhao
+        if talhao.volume_m3 is not None and talhao.area_ha:
+            return (talhao.volume_m3 / talhao.area_ha).quantize(Decimal("0.001"))
+        if inventario is not None and inventario.volume_ha:
+            return inventario.volume_ha
+        return None
+
+    @staticmethod
+    def volume_do_talhao(
+        talhao: Talhao, inventario: InventarioFlorestal | None = None
+    ) -> Decimal | None:
+        """Volume inventariado (IFPC): do inventário do talhão, senão do talhão."""
+        if inventario is not None:
+            volume = (
+                InventarioTalhao.objects.filter(inventario=inventario, talhao=talhao)
+                .values_list("volume_total", flat=True)
+                .first()
+            )
+            if volume:
+                return volume
+        if talhao.volume_m3 is not None:
+            return talhao.volume_m3
+        rendimento = Colheita.rendimento_do_talhao(talhao, inventario)
+        return (rendimento * talhao.area_ha) if rendimento else None
+
+    @staticmethod
+    def volume_ja_feito(
+        talhao_id: int, etapa: str, exceto: int | None = None
+    ) -> Decimal:
+        """Volume do talhão já lançado nesta etapa."""
+        colheitas = Colheita.objects.filter(talhao_id=talhao_id, etapa=etapa)
+        if exceto is not None:
+            colheitas = colheitas.exclude(pk=exceto)
+        total = colheitas.aggregate(total=models.Sum("volume_m3"))["total"]
+        return (total or Decimal(0)).quantize(Decimal("0.001"))
+
+    def volume_a_fazer(self) -> Decimal | None:
+        """Saldo do talhão nesta etapa, em m³, depois de todos os lançamentos."""
+        total = self.volume_do_talhao(self.talhao, self.inventario)
+        if total is None:
+            return None
+        return total - self.volume_ja_feito(self.talhao_id, self.etapa)
+
+    @staticmethod
+    def area_ja_colhida(
+        talhao_id: int, etapa: str, exceto: int | None = None
+    ) -> Decimal:
+        """Área do talhão já lançada nesta etapa."""
+        colheitas = Colheita.objects.filter(talhao_id=talhao_id, etapa=etapa)
+        if exceto is not None:
+            colheitas = colheitas.exclude(pk=exceto)
+        total = colheitas.aggregate(total=models.Sum("area_ha"))["total"]
+        return (total or Decimal(0)).quantize(Decimal("0.0001"))
+
+
+    def quantidade_paga(self) -> Decimal | None:
+        if self.unidade_pagamento == UnidadeTarifa.HA:
+            return self.area_ha
+        if self.volume_m3 is None:
+            return None
+        if self.volume_m3 is None:
+            return None
+        if self.unidade_pagamento == UnidadeTarifa.MST:
+            fator = ParametroEmpresa.da_empresa(self.empresa_id).fator_mst_por_m3
+            return self.volume_m3 * fator
+        return self.volume_m3
 
     def save(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
-        # O volume colhido é o volume do inventário, que não é alterado.
-        self.volume_total = self.inventario.volume_total
+        self.sistema = SISTEMA_DA_ETAPA[EtapaColheita(self.etapa)]
+        if self.tipo_execucao == TipoExecucao.PROPRIA:
+            self.fornecedor = None
+        self.rendimento_m3_ha = self.rendimento_do_talhao(self.talhao, self.inventario)
+        rendimento = self.rendimento_m3_ha
+        if self.volume_m3 is None and self.area_ha is not None and rendimento:
+            self.volume_m3 = (self.area_ha * rendimento).quantize(Decimal("0.001"))
+        if self.area_ha is None and self.volume_m3 is not None and rendimento:
+            self.area_ha = (self.volume_m3 / rendimento).quantize(Decimal("0.0001"))
+        quantidade = self.quantidade_paga()
+        self.valor_total = None
+        if quantidade is not None and self.valor_unitario is not None:
+            self.valor_total = (quantidade * self.valor_unitario).quantize(
+                Decimal("0.01")
+            )
         super().save(*args, **kwargs)
-
-    def volume_inventario(self) -> Decimal:
-        return self.inventario.volume_total
-
-    def estoque_em_campo(self) -> Decimal:
-        # Informativo: não altera o volume do inventário nem baixa autorização.
-        return self.volume_total
 
 
 class InventarioTalhao(RegistroAuditavel):

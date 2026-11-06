@@ -1,0 +1,137 @@
+{% extends "sistema/base.html" %}
+{% block title %}Painel dos fornos · RVC-FC{% endblock %}
+{% block content %}
+  <div class="page-heading">
+    <div>
+      <p class="eyebrow"><a href="{% url 'lista_registros' 'ciclos-forno' %}">Ciclos de forno</a></p>
+      <h1>Painel dos fornos · {{ grade.inicio|date:"F \d\e Y" }}</h1>
+      <p class="page-description">Estado de cada forno em cada dia, pelos lançamentos de enchimento, fim da carbonização e descarga.</p>
+    </div>
+    <div class="heading-actions">
+      <a class="button button-secondary" href="?mes={{ grade.anterior }}&ver={{ ver }}"><span aria-hidden="true">←</span> Mês anterior</a>
+      <a class="button button-secondary" href="?mes={{ grade.proximo }}&ver={{ ver }}">Próximo mês <span aria-hidden="true">→</span></a>
+      {% if pode_planejar %}<a class="button" href="{% url 'novo_registro' 'planejamentos-forno' %}">Planejar</a>{% endif %}
+    </div>
+  </div>
+
+  <nav class="grade-modos" aria-label="O que mostrar">
+    <a href="?mes={{ mes_atual }}&ver=ambos"{% if ver == "ambos" %} aria-current="page"{% endif %}>Planejado e realizado</a>
+    <a href="?mes={{ mes_atual }}&ver=re"{% if ver == "re" %} aria-current="page"{% endif %}>Só realizado</a>
+    <a href="?mes={{ mes_atual }}&ver=pl"{% if ver == "pl" %} aria-current="page"{% endif %}>Só planejado</a>
+    <span class="grade-resumo">Linha PL: {{ grade.total_ciclos_pl }} ciclos, {{ grade.total_mdc_pl }} MDC · Realizado: {{ grade.total_ciclos }} ciclos, {{ grade.total_mdc }} MDC</span>
+  </nav>
+
+  {% with ritmo=grade.ritmo %}
+    <section class="panel dashboard-panel desempenho" aria-labelledby="desempenho-heading">
+      <h2 id="desempenho-heading">Desempenho do ciclo no mês{% if desempenho %} <small>{{ desempenho.ciclos }} ciclo{{ desempenho.ciclos|pluralize }} descarregado{{ desempenho.ciclos|pluralize }}</small>{% endif %}</h2>
+      <div class="ritmo-grid">
+        <table class="tabela-numeros">
+          <thead><tr><th scope="col">Produção (MDC)</th><th scope="col">Planejado</th><th scope="col">Real</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Até hoje ({{ ritmo.decorridos }} de {{ ritmo.dias_mes }} dias)</th><td>{{ ritmo.plano_ate_hoje }}</td><td>{{ ritmo.real }}{% if ritmo.atingido_pct is not None %} <small class="{% if ritmo.atingido_pct < 100 %}valor-alerta{% endif %}">({{ ritmo.atingido_pct }}%)</small>{% endif %}</td></tr>
+            <tr><th scope="row">Mês inteiro</th><td>{{ ritmo.plano_mes }} <small>({{ ritmo.plano_ciclos }} ciclos)</small></td><td>{% if ritmo.previsao_abaixo %}<strong class="valor-alerta">⚠ {{ ritmo.previsao }}</strong>{% else %}{{ ritmo.previsao }}{% endif %} <small>{% if ritmo.restantes %}previsão{% else %}fechado{% endif %}</small></td></tr>
+          </tbody>
+        </table>
+        <table class="tabela-numeros">
+          <thead><tr><th scope="col">Ritmo (MDC por dia)</th><th scope="col"></th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Planejado</th><td>{{ ritmo.ritmo_plano }}</td></tr>
+            <tr><th scope="row">Real até hoje</th><td>{% if ritmo.ritmo_abaixo %}<strong class="valor-alerta">⚠ {{ ritmo.ritmo_real }}</strong>{% else %}{{ ritmo.ritmo_real }}{% endif %}</td></tr>
+            {% if ritmo.ritmo_necessario %}<tr><th scope="row">Necessário nos {{ ritmo.restantes }} dias restantes</th><td>{{ ritmo.ritmo_necessario }}</td></tr>{% endif %}
+          </tbody>
+        </table>
+      </div>
+      <p class="help-text">Planejado: o plano do início do mês (planejamento ou continuação dos ciclos). Real: carvão descarregado até hoje. Previsão: realizado + o que os fornos devem descarregar até o fim do mês.</p>
+      {% if desempenho %}
+      <div class="desempenho-grid">
+        <table class="tabela-numeros">
+          <thead><tr><th scope="col">Etapa (dias)</th><th scope="col">Real</th><th scope="col">Prazo</th><th scope="col">Diferença</th></tr></thead>
+          <tbody>
+            {% for etapa in desempenho.etapas %}
+              <tr><th scope="row">{{ etapa.rotulo }}</th><td>{{ etapa.real }}</td><td>{{ etapa.previsto }}</td><td>{% if etapa.acima %}<strong class="valor-alerta">⚠ +{{ etapa.diferenca }}</strong>{% else %}{{ etapa.diferenca }}{% endif %}</td></tr>
+            {% endfor %}
+            <tr class="grade-total"><th scope="row">Ciclo completo</th><td>{{ desempenho.ciclo_real }}</td><td>{{ desempenho.ciclo_previsto }}</td><td></td></tr>
+          </tbody>
+        </table>
+        <table class="tabela-numeros">
+          <thead><tr><th scope="col">Conversão</th><th scope="col">Real</th><th scope="col">Referência</th></tr></thead>
+          <tbody>
+            {% for fator in desempenho.fatores %}
+              <tr><th scope="row">{{ fator.rotulo }}</th><td>{% if fator.acima %}<strong class="valor-alerta">⚠ {{ fator.real }}</strong>{% else %}{{ fator.real }}{% endif %}</td><td>{{ fator.referencia }}</td></tr>
+            {% endfor %}
+            <tr><th scope="row">MDC por ciclo</th><td>{{ desempenho.mdc_medio }}</td><td></td></tr>
+          </tbody>
+        </table>
+        <div class="desempenho-resumo">
+          <p><strong>{{ desempenho.atraso_carb_pct }}%</strong> dos ciclos passaram do prazo de carbonização e <strong>{{ desempenho.atraso_resf_pct }}%</strong> do de resfriamento.</p>
+          {% if desempenho.perda_mdc %}
+            <p class="valor-alerta">Com o ciclo real de {{ desempenho.ciclo_real }} dias, em vez de {{ desempenho.ciclo_previsto }}, os fornos deixaram de produzir cerca de <strong>{{ desempenho.perda_mdc }} MDC</strong> no período.</p>
+          {% else %}
+            <p>O ciclo real está dentro dos prazos do tipo de forno.</p>
+          {% endif %}
+          <p class="help-text">Prazos e referências são parâmetros: ajuste em Tipos de forno e em Parâmetros de produção (fator {{ desempenho.fator_mst_m3 }} MST/m³).</p>
+        </div>
+      </div>
+      {% endif %}
+    </section>
+  {% endwith %}
+
+  <ul class="chart-legend panel-legend">
+    {% for codigo, rotulo in estados %}
+      <li><span class="estado-celula estado-{{ codigo }}" aria-hidden="true">{{ codigo }}</span>{{ rotulo }}</li>
+    {% endfor %}
+  </ul>
+
+  {% if grade.linhas %}
+    <section class="panel">
+      <div class="table-wrap grade-wrap">
+        <table class="grade-fornos">
+          <caption class="sr-only">Estado dos fornos por dia</caption>
+          <thead>
+            <tr>
+              <th scope="col" class="grade-forno">Forno</th>
+              {% if ver == "ambos" %}<th scope="col"></th>{% endif %}
+              {% for dia in grade.dias %}
+                <th scope="col" class="{% if dia.data == hoje %}grade-hoje{% endif %}"><span>{{ dia.numero }}</span><small>{{ dia.semana }}</small></th>
+              {% endfor %}
+              <th scope="col">Ciclos</th>
+              <th scope="col">MDC</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for linha in grade.linhas %}
+              {% if linha.nova_upc %}
+                <tr class="grade-upc"><th scope="rowgroup" colspan="{{ grade.dias|length|add:4 }}">{{ linha.forno.upc }}</th></tr>
+              {% endif %}
+              {% if ver != "re" %}
+                <tr class="grade-linha-pl">
+                  <th scope="row" class="grade-forno"{% if ver == "ambos" %} rowspan="2"{% endif %}>{{ linha.forno.identificacao }}{% if linha.planejado %} <span class="grade-plano" title="Planejado no mês">●</span>{% endif %}</th>
+                  {% if ver == "ambos" %}<td class="grade-tipo">PL</td>{% endif %}
+                  {% for estado in linha.planejados %}
+                    <td>{% if estado %}<span class="estado-celula estado-pl estado-{{ estado }}">{{ estado }}</span>{% endif %}</td>
+                  {% endfor %}
+                  <td class="grade-numero">{{ linha.ciclos_pl }}</td>
+                  <td class="grade-numero">{{ linha.mdc_pl }}</td>
+                </tr>
+              {% endif %}
+              {% if ver != "pl" %}
+                <tr>
+                  {% if ver == "re" %}<th scope="row" class="grade-forno">{{ linha.forno.identificacao }}</th>{% endif %}
+                  {% if ver == "ambos" %}<td class="grade-tipo">RE</td>{% endif %}
+                  {% for estado in linha.estados %}
+                    <td>{% if estado %}<span class="estado-celula estado-{{ estado }}">{{ estado }}</span>{% endif %}</td>
+                  {% endfor %}
+                  <td class="grade-numero">{{ linha.ciclos }}</td>
+                  <td class="grade-numero">{{ linha.mdc }}</td>
+                </tr>
+              {% endif %}
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    <p class="help-text">No mês corrente, a linha PL mostra o realizado até ontem e a previsão de hoje em diante. PL: projetado pelos prazos do tipo de forno (carbonização, resfriamento e dias vazio até o novo enchimento), a partir do planejamento do mês (●) ou, sem ele, do último ciclo real. RE: pelos lançamentos; L aparece quando o acendimento é em outro dia do enchimento.</p>
+  {% else %}
+    <section class="panel"><p class="empty-chart">Nenhum forno cadastrado nas UPCs que você acompanha.</p></section>
+  {% endif %}
+{% endblock %}

@@ -6,23 +6,38 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#153d2b">
     <title>{% block title %}RVC-FC{% endblock %}</title>
-    <link rel="stylesheet" href="{% static 'sistema/app.css' %}?v=3">
+    <link rel="stylesheet" href="{% static 'sistema/app.css' %}?v=10">
+    <script>
+      // Aplica o menu recolhido antes de desenhar a página (evita piscar).
+      try {
+        if (localStorage.getItem("rvcfc-menu") === "recolhido") {
+          document.documentElement.classList.add("menu-recolhido");
+        }
+      } catch (erro) {}
+    </script>
   </head>
   <body>
+    {% if request.user.is_authenticated %}{% include "sistema/_icones.html" %}{% endif %}
     {% if request.user.is_authenticated %}
       <header class="topbar">
         <a class="brand" href="{% url 'inicio' %}" aria-label="RVC-FC, início">
           <span class="brand-mark" aria-hidden="true">R</span>
           <span><strong>RVC-FC</strong><small>Gestão florestal</small></span>
         </a>
+        {% if empresa_ativa %}
+          <div class="topbar-empresa" title="{{ empresa_ativa.identificacao }}">
+            <span class="unit-indicator{% if empresa_ativa.encerrada %} is-encerrada{% endif %}" aria-hidden="true"></span>
+            <span class="topbar-empresa-nome">{{ empresa_ativa.razao_social|truncatechars:34 }}</span>
+            {% if empresa_ativa.descricao_filial %}<span class="topbar-empresa-filial">{{ empresa_ativa.descricao_filial }}</span>{% endif %}
+            {% if upc_ativa %}<span class="topbar-empresa-filial">UPC {{ upc_ativa.nome }}</span>{% endif %}
+          </div>
+        {% endif %}
         <div class="topbar-user">
           <div class="user-details">
             <strong>{{ request.user.nome_completo|default:request.user.username }}</strong>
             <span>{% if usuario_superusuario %}Superusuário{% else %}{{ request.user.get_tipo_usuario_display }}{% endif %}</span>
-            {% if empresa_ativa %}
-              <span>{{ empresa_ativa.identificacao }}{% if upc_ativa %} · UPC {{ upc_ativa.nome }}{% endif %}</span>
-            {% endif %}
           </div>
+          <span class="avatar" aria-hidden="true">{{ request.user.nome_completo|default:request.user.username|slice:":1"|upper }}</span>
           {% if pode_trocar_empresa %}
             <a class="button button-quiet" href="{% url 'selecionar_empresa' %}">Trocar empresa</a>
           {% endif %}
@@ -37,19 +52,39 @@
           {% if request.user.primeiro_acesso %}
             <p class="sidebar-aviso">Defina uma nova senha para liberar o menu.</p>
           {% else %}
+          <button class="menu-recolher" type="button" data-menu-recolher aria-expanded="true" title="Recolher o menu">
+            <svg class="icone" viewBox="0 0 24 24" aria-hidden="true"><use href="#icone-recolher"/></svg>
+            <span class="menu-texto">Recolher menu</span>
+          </button>
           <nav class="menu" aria-label="Navegação principal">
-            <a class="nav-link{% if request.resolver_match.url_name == 'inicio' %} is-active{% endif %}" href="{% url 'inicio' %}">Visão geral</a>
-            {% for grupo in menu %}
-              <details class="menu-grupo"{% if grupo.aberto %} open{% endif %}>
-                <summary>{{ grupo.titulo }}</summary>
+            <a class="nav-link{% if request.resolver_match.url_name == 'inicio' %} is-active{% endif %}" href="{% url 'inicio' %}" title="Visão geral"{% if request.resolver_match.url_name == 'inicio' %} aria-current="page"{% endif %}>
+              <svg class="icone" viewBox="0 0 24 24" aria-hidden="true"><use href="#icone-casa"/></svg>
+              <span class="menu-texto">Visão geral</span>
+            </a>
+            {% for secao in menu %}
+              <details class="menu-secao{% if secao.ativa %} tem-ativo{% endif %}" data-secao="{{ secao.chave }}"{% if secao.ativa %} open{% endif %}>
+                <summary title="{{ secao.titulo }}">
+                  <svg class="icone" viewBox="0 0 24 24" aria-hidden="true"><use href="#icone-{{ secao.icone }}"/></svg>
+                  <span class="menu-texto">{{ secao.titulo }}</span>
+                  <svg class="icone menu-seta" viewBox="0 0 24 24" aria-hidden="true"><use href="#icone-seta"/></svg>
+                </summary>
                 <div class="menu-itens">
-                  {% for item in grupo.itens %}
-                    <a class="nav-link{% if item.ativo %} is-active{% endif %}" href="{{ item.url }}"{% if item.ativo %} aria-current="page"{% endif %}>{{ item.titulo }}</a>
+                  {% for parte in secao.subsecoes %}
+                    <p class="menu-subtitulo">{{ parte.titulo }}</p>
+                    {% for item in parte.itens %}
+                      <a class="nav-link{% if item.ativo %} is-active{% endif %}" href="{{ item.url }}" title="{{ item.titulo }}"{% if item.ativo %} aria-current="page"{% endif %}>
+                        <svg class="icone" viewBox="0 0 24 24" aria-hidden="true"><use href="#icone-{{ item.icone }}"/></svg>
+                        <span class="menu-texto">{{ item.titulo }}</span>
+                      </a>
+                    {% endfor %}
                   {% endfor %}
                 </div>
               </details>
             {% endfor %}
-            <a class="nav-link nav-link-conta{% if request.resolver_match.url_name == 'password_change' %} is-active{% endif %}" href="{% url 'password_change' %}">Alterar senha</a>
+            <a class="nav-link nav-link-conta{% if request.resolver_match.url_name == 'password_change' %} is-active{% endif %}" href="{% url 'password_change' %}" title="Alterar senha">
+              <svg class="icone" viewBox="0 0 24 24" aria-hidden="true"><use href="#icone-chave"/></svg>
+              <span class="menu-texto">Alterar senha</span>
+            </a>
           </nav>
           {% endif %}
           {% if empresa_ativa %}
@@ -77,6 +112,6 @@
     {% else %}
       {% block public_content %}{% endblock %}
     {% endif %}
-    <script src="{% static 'sistema/app.js' %}?v=11" defer></script>
+    <script src="{% static 'sistema/app.js' %}?v=12" defer></script>
   </body>
 </html>

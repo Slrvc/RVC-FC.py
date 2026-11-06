@@ -246,6 +246,193 @@ document.querySelectorAll("form[data-talhoes-url]").forEach((form) => {
   }
 });
 
+document.querySelectorAll("form[data-colheita-talhoes-url]").forEach((form) => {
+  const campo = (nome) => form.querySelector(`#id_${nome}`);
+  const inventario = campo("inventario");
+  const talhao = campo("talhao");
+  const etapa = campo("etapa");
+  const area = campo("area_ha");
+  const volume = campo("volume_m3");
+  const execucao = campo("tipo_execucao");
+  const fornecedor = campo("fornecedor");
+  const unidade = campo("unidade_pagamento");
+  const valor = campo("valor_unitario");
+  const resumo = form.querySelector("#colheita-talhao-resumo");
+  const total = form.querySelector("#colheita-valor-total");
+  const elementos = [inventario, talhao, etapa, area, volume, execucao, fornecedor];
+  if (elementos.includes(null) || !unidade || !valor || !resumo || !total) {
+    return;
+  }
+
+  const fatorMst = Number.parseFloat(form.dataset.fatorMst) || 1.5;
+  const numero = (texto) => {
+    const valorNumerico = Number.parseFloat(String(texto || "").replace(",", "."));
+    return Number.isFinite(valorNumerico) ? valorNumerico : null;
+  };
+  const formatar = (valorNumerico, casas = 2) =>
+    valorNumerico.toLocaleString("pt-BR", {
+      minimumFractionDigits: casas,
+      maximumFractionDigits: casas,
+    });
+  // Área e valor seguem os cálculos enquanto o usuário não digitar outro.
+  let areaAutomatica = area.value === "";
+  let valorAutomatico = valor.value === "";
+  area.addEventListener("input", () => {
+    areaAutomatica = area.value === "";
+    atualizar();
+  });
+  valor.addEventListener("input", () => {
+    valorAutomatico = valor.value === "";
+    atualizar();
+  });
+
+  const atualizar = () => {
+    const opcao = talhao.selectedOptions[0];
+    const volumeInformado = numero(volume.value);
+    resumo.classList.remove("field-status-erro");
+    if (!opcao || !opcao.value || opcao.dataset.area === undefined) {
+      resumo.textContent = "";
+    } else {
+      const volumeTalhao = numero(opcao.dataset.volume);
+      const feito = numero(opcao.dataset.feito) || 0;
+      const rendimento = numero(opcao.dataset.rendimento);
+      const partes = [];
+      if (volumeTalhao !== null) {
+        const aFazer = volumeTalhao - feito;
+        partes.push(
+          `Inventário ${formatar(volumeTalhao)} m³`,
+          `já feito nesta etapa ${formatar(feito)} m³`,
+          `a fazer ${formatar(aFazer)} m³`,
+        );
+        if (volumeInformado !== null) {
+          const restante = aFazer - volumeInformado;
+          partes.push(`restará ${formatar(restante)} m³`);
+          if (restante < -0.005) {
+            resumo.classList.add("field-status-erro");
+          }
+        }
+      }
+      partes.push(
+        rendimento === null
+          ? "sem rendimento (m³/ha) no inventário ou no talhão"
+          : `rendimento ${formatar(rendimento, 3)} m³/ha`,
+      );
+      resumo.textContent = partes.join(" · ");
+      if (areaAutomatica) {
+        area.value =
+          rendimento && volumeInformado !== null
+            ? (volumeInformado / rendimento).toFixed(4)
+            : "";
+      }
+    }
+    const areaInformada = numero(area.value);
+    const quantidade =
+      unidade.value === "HA"
+        ? areaInformada
+        : unidade.value === "MST" && volumeInformado !== null
+          ? volumeInformado * fatorMst
+          : volumeInformado;
+    const valorUnitario = numero(valor.value);
+    total.textContent =
+      quantidade !== null && valorUnitario !== null
+        ? `Valor a pagar: R$ ${formatar(quantidade * valorUnitario)}`
+        : "";
+  };
+
+  let requisicaoTarifa;
+  const buscarTarifa = async () => {
+    if (!valorAutomatico) {
+      return;
+    }
+    requisicaoTarifa?.abort();
+    if (execucao.value !== "TERCEIRIZADA" || !fornecedor.value) {
+      valor.value = "";
+      atualizar();
+      return;
+    }
+    const controlador = new AbortController();
+    requisicaoTarifa = controlador;
+    try {
+      const url = new URL(form.dataset.tarifaUrl, window.location.origin);
+      url.searchParams.set("fornecedor", fornecedor.value);
+      url.searchParams.set("servico", etapa.value);
+      const data = campo("data_inicio")?.value;
+      if (data) {
+        url.searchParams.set("data", data);
+      }
+      const resposta = await fetch(url, { signal: controlador.signal });
+      const { tarifa } = await resposta.json();
+      if (tarifa && ["M3", "MST", "HA"].includes(tarifa.unidade)) {
+        valor.value = tarifa.valor;
+        unidade.value = tarifa.unidade;
+      } else {
+        valor.value = "";
+      }
+      atualizar();
+    } catch (erro) {
+      if (!controlador.signal.aborted) {
+        console.error("Falha ao buscar a tarifa do empreiteiro.", erro);
+      }
+    }
+  };
+
+  let requisicaoTalhoes;
+  const carregarTalhoes = async () => {
+    requisicaoTalhoes?.abort();
+    if (!inventario.value) {
+      atualizar();
+      return;
+    }
+    const selecionado = talhao.value;
+    const controlador = new AbortController();
+    requisicaoTalhoes = controlador;
+    resumo.textContent = "Carregando talhões do inventário...";
+    try {
+      const url = new URL(form.dataset.colheitaTalhoesUrl, window.location.origin);
+      url.searchParams.set("inventario", inventario.value);
+      url.searchParams.set("etapa", etapa.value);
+      if (form.dataset.colheita) {
+        url.searchParams.set("colheita", form.dataset.colheita);
+      }
+      const resposta = await fetch(url, { signal: controlador.signal });
+      const dados = await resposta.json();
+      if (!resposta.ok) {
+        throw new Error(dados.erro || "Não foi possível carregar os talhões.");
+      }
+      talhao.replaceChildren(new Option("Selecione um talhão", ""));
+      dados.talhoes.forEach((item) => {
+        const opcao = new Option(item.identificacao, item.codigo);
+        opcao.dataset.area = item.area_ha;
+        opcao.dataset.volume = item.volume_talhao_m3;
+        opcao.dataset.feito = item.volume_feito_m3;
+        opcao.dataset.rendimento = item.rendimento_m3_ha;
+        talhao.add(opcao);
+      });
+      talhao.value = selecionado;
+      atualizar();
+    } catch (erro) {
+      if (controlador.signal.aborted) {
+        return;
+      }
+      resumo.textContent = "Não foi possível carregar os dados do talhão.";
+      console.error("Falha ao carregar talhões da colheita.", erro);
+    }
+  };
+
+  inventario.addEventListener("change", carregarTalhoes);
+  etapa.addEventListener("change", () => {
+    carregarTalhoes();
+    buscarTarifa();
+  });
+  talhao.addEventListener("change", atualizar);
+  volume.addEventListener("input", atualizar);
+  unidade.addEventListener("change", atualizar);
+  [execucao, fornecedor, campo("data_inicio")].forEach((item) =>
+    item?.addEventListener("change", buscarTarifa),
+  );
+  carregarTalhoes();
+});
+
 document.querySelectorAll("form").forEach((form) => {
   const modalidade = form.querySelector("#id_modalidade");
   const upcs = form.querySelector("#id_upcs");
@@ -500,3 +687,90 @@ document.querySelectorAll("form[data-rascunho]").forEach((form) => {
     }
   }
 });
+
+document.querySelectorAll("select[data-padroes-pais]").forEach((pais) => {
+  let padroes = {};
+  try {
+    padroes = JSON.parse(pais.dataset.padroesPais);
+  } catch (erro) {
+    console.error("Padrões de país inválidos.", erro);
+    return;
+  }
+  pais.addEventListener("change", () => {
+    Object.entries(padroes[pais.value] || {}).forEach(([nome, valor]) => {
+      const campo = pais.form?.querySelector(`[name="${nome}"]`);
+      if (campo) {
+        campo.value = valor;
+      }
+    });
+  });
+});
+
+// Menu lateral: recolher/expandir e lembrar as seções abertas.
+(() => {
+  const raiz = document.documentElement;
+  const botao = document.querySelector("[data-menu-recolher]");
+  const secoes = document.querySelectorAll(".menu-secao[data-secao]");
+  const ler = (chave) => {
+    try {
+      return localStorage.getItem(chave);
+    } catch (erro) {
+      return null;
+    }
+  };
+  const gravar = (chave, valor) => {
+    try {
+      localStorage.setItem(chave, valor);
+    } catch (erro) {
+      // Sem armazenamento: o menu só não lembra a preferência.
+    }
+  };
+  const atualizarBotao = () => {
+    if (!botao) {
+      return;
+    }
+    const recolhido = raiz.classList.contains("menu-recolhido");
+    botao.setAttribute("aria-expanded", String(!recolhido));
+    botao.title = recolhido ? "Expandir o menu" : "Recolher o menu";
+    const texto = botao.querySelector(".menu-texto");
+    if (texto) {
+      texto.textContent = recolhido ? "Expandir menu" : "Recolher menu";
+    }
+  };
+  const recolher = (sim) => {
+    raiz.classList.toggle("menu-recolhido", sim);
+    gravar("rvcfc-menu", sim ? "recolhido" : "aberto");
+    atualizarBotao();
+  };
+  botao?.addEventListener("click", () => {
+    recolher(!raiz.classList.contains("menu-recolhido"));
+  });
+  atualizarBotao();
+
+  let abertas = [];
+  try {
+    abertas = JSON.parse(ler("rvcfc-secoes") || "[]");
+  } catch (erro) {
+    abertas = [];
+  }
+  secoes.forEach((secao) => {
+    if (abertas.includes(secao.dataset.secao)) {
+      secao.open = true;
+    }
+    const resumo = secao.querySelector("summary");
+    resumo?.addEventListener("click", (evento) => {
+      // Recolhido: clicar numa seção abre o menu já com ela aberta.
+      if (raiz.classList.contains("menu-recolhido")) {
+        evento.preventDefault();
+        secao.open = true;
+        recolher(false);
+      }
+    });
+    secao.addEventListener("toggle", () => {
+      const atuais = Array.from(secoes)
+        .filter((item) => item.open)
+        .map((item) => item.dataset.secao);
+      gravar("rvcfc-secoes", JSON.stringify(atuais));
+    });
+  });
+})();

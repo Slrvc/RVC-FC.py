@@ -1,0 +1,50 @@
+{% extends "sistema/base.html" %}
+{% block title %}Consolidado da colheita · RVC-FC{% endblock %}
+{% block content %}
+  <div class="page-heading">
+    <div>
+      <p class="eyebrow"><a href="{% url 'lista_registros' 'colheitas' %}">Colheitas</a></p>
+      <h1>Consolidado da colheita</h1>
+      <p class="page-description">Por talhão: volume do inventário (IFPC), o feito e o saldo de cada etapa, o transportado e o disponível para transporte. Volumes em m³.</p>
+    </div>
+    <div class="heading-actions">
+      <a class="button" href="{% url 'novo_registro' 'colheitas' %}"><span aria-hidden="true">＋</span> Lançar colheita</a>
+    </div>
+  </div>
+  <section class="panel">
+    {% if consolidado.linhas %}
+      <div class="table-wrap">
+        <table class="tabela-numeros">
+          <thead>
+            <tr>
+              <th scope="col" rowspan="2">Talhão</th>
+              <th scope="col" rowspan="2">IFPC</th>
+              {% for etapa in consolidado.etapas %}<th scope="colgroup" colspan="2" class="grupo">{{ etapa }}</th>{% endfor %}
+              <th scope="col" rowspan="2">Transportado</th>
+              <th scope="col" rowspan="2">Disponível p/ transporte</th>
+              <th scope="col" rowspan="2">Início do corte</th>
+              <th scope="col" rowspan="2">Dias de secagem</th>
+            </tr>
+            <tr>{% for etapa in consolidado.etapas %}<th scope="col">Feito</th><th scope="col">Saldo</th>{% endfor %}</tr>
+          </thead>
+          <tbody>
+            {% for linha in consolidado.linhas %}
+              <tr>
+                <th scope="row" class="talhao-celula">{{ linha.talhao.identificacao }}<small>{{ linha.talhao.fazenda.nome|cut:"FAZENDA "|title }}</small></th>
+                <td>{{ linha.ifpc }}</td>
+                {% for etapa in linha.etapas %}<td>{{ etapa.feito }}</td><td class="saldo">{{ etapa.saldo }}</td>{% endfor %}
+                <td>{{ linha.transportado }}</td>
+                <td>{% if linha.negativo %}<strong class="valor-alerta" title="Transportado mais que o traçado/embandeirado">⚠ {{ linha.disponivel }}</strong>{% else %}{{ linha.disponivel }}{% endif %}</td>
+                <td>{{ linha.inicio_corte|date:"d/m/Y"|default:"—" }}</td>
+                <td>{{ linha.dias_secagem|default_if_none:"—" }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="empty-chart">Nenhuma colheita lançada.</p>
+    {% endif %}
+  </section>
+  <p class="help-text">Disponível para transporte = traçado (mecanizada) + embandeirado (manual) − transportado. Negativo indica transporte acima do traçado: confira os lançamentos. Dias de secagem contam do primeiro corte do talhão.</p>
+{% endblock %}

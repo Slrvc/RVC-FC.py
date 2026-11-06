@@ -1,0 +1,102 @@
+<section aria-labelledby="producao-heading">
+  <div class="section-heading">
+    <div>
+      <h2 id="producao-heading">Produção de {{ dashboard.mes|date:"F \d\e Y" }}</h2>
+      <p>Do dia 1º até hoje, nas UPCs que você acompanha</p>
+    </div>
+  </div>
+  <div class="metric-grid metric-grid-6">
+    {% for titulo, valor, nota in dashboard.indicadores %}
+      <article class="metric-card">
+        <div class="metric-label">{{ titulo }}</div>
+        <strong class="metric-value">{{ valor }}</strong>
+        <span class="metric-note">{{ nota }}</span>
+      </article>
+    {% endfor %}
+  </div>
+</section>
+
+<section aria-labelledby="fornos-heading">
+  <div class="section-heading">
+    <div>
+      <h2 id="fornos-heading">Ciclo dos fornos agora</h2>
+      <p>{{ dashboard.fornos.total }} forno{{ dashboard.fornos.total|pluralize }} cadastrado{{ dashboard.fornos.total|pluralize }} (sem os desativados)</p>
+    </div>
+    {% if dashboard.ve_ciclos %}
+      <div class="heading-actions">
+        <a class="button button-secondary" href="{% url 'painel_fornos' %}">Painel completo <span aria-hidden="true">→</span></a>
+        <a class="button button-secondary" href="{% url 'lista_registros' 'ciclos-forno' %}">Lançar etapas</a>
+      </div>
+    {% endif %}
+  </div>
+  <div class="panel dashboard-panel">
+    {% if dashboard.fornos.total %}
+      <div class="segmented-bar" role="img" aria-label="{% for parte in dashboard.fornos.partes %}{{ parte.rotulo }}: {{ parte.quantidade }}{% if not forloop.last %}; {% endif %}{% endfor %}">
+        {% for parte in dashboard.fornos.partes %}
+          <div class="segment estado-{{ parte.codigo }}" style="flex-grow: {{ parte.quantidade }}" title="{{ parte.rotulo }}: {{ parte.quantidade }} ({{ parte.percentual|floatformat:1 }}%)">
+            <span>{{ parte.quantidade }}</span>
+          </div>
+        {% endfor %}
+      </div>
+      <ul class="chart-legend">
+        {% for parte in dashboard.fornos.partes %}
+          <li><span class="legend-swatch estado-{{ parte.codigo }}" aria-hidden="true"></span>{{ parte.rotulo }}</li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="empty-chart">Nenhum forno cadastrado nas UPCs que você acompanha.</p>
+    {% endif %}
+  </div>
+</section>
+
+<section aria-labelledby="graficos-heading">
+  <div class="section-heading">
+    <div>
+      <h2 id="graficos-heading">Últimos 30 dias</h2>
+      <p>Passe o mouse (ou toque) numa coluna para ver o valor do dia</p>
+    </div>
+  </div>
+  <div class="chart-grid">
+    {% for grafico in dashboard.graficos %}
+      <figure class="panel chart-card">
+        <figcaption>
+          <span class="chart-title">{{ grafico.titulo }}</span>
+          <span class="chart-total">{{ grafico.total }} {{ grafico.unidade }}</span>
+        </figcaption>
+        {% if grafico.vazio %}
+          <p class="empty-chart">Sem lançamentos no período.</p>
+        {% else %}
+          <div class="column-chart" role="list" aria-label="{{ grafico.titulo }} por dia, em {{ grafico.unidade }}">
+            {% for coluna in grafico.colunas %}
+              <div class="column-slot" role="listitem" tabindex="0" aria-label="{{ coluna.descricao }}" data-dica="{{ coluna.descricao }}">
+                <span class="column-bar" style="height: {{ coluna.altura|stringformat:'.1f' }}%"></span>
+              </div>
+            {% endfor %}
+          </div>
+          <div class="column-axis" aria-hidden="true">
+            {% for coluna in grafico.colunas %}<span>{% if coluna.marcar_dia %}{{ coluna.rotulo_dia }}{% endif %}</span>{% endfor %}
+          </div>
+        {% endif %}
+      </figure>
+    {% endfor %}
+    <figure class="panel chart-card">
+      <figcaption>
+        <span class="chart-title">Colheita do mês por etapa</span>
+        <span class="chart-total">ha</span>
+      </figcaption>
+      {% if dashboard.colheita_por_etapa %}
+        <ul class="bar-list">
+          {% for linha in dashboard.colheita_por_etapa %}
+            <li>
+              <span class="bar-label">{{ linha.rotulo }}</span>
+              <span class="bar-track"><span class="bar-fill" style="width: {{ linha.largura|stringformat:'.1f' }}%"></span></span>
+              <span class="bar-value">{{ linha.valor }}</span>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="empty-chart">Sem colheita lançada no mês.</p>
+      {% endif %}
+    </figure>
+  </div>
+</section>

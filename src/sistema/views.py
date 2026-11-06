@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import calendar
+from datetime import date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
@@ -10,11 +12,13 @@ from django.contrib.auth.views import LoginView, PasswordChangeView
 from django.core.exceptions import PermissionDenied
 from django.core.paginator import Paginator
 from django.db import transaction
-from django.db.models import Model, ProtectedError, Q
+from django.db.models import Count, Model, ProtectedError, Q
 from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse, reverse_lazy
+from django.utils import timezone
 from django.utils.http import url_has_allowed_host_and_scheme, urlencode
+from django.utils.safestring import SafeData
 
 from sistema.contexto import (
     definir_empresa_ativa,
@@ -23,7 +27,14 @@ from sistema.contexto import (
     upc_ativa,
     usa_contexto_de_upc,
 )
+from sistema.formatacao import (
+    casas_do_campo,
+    formatar_data,
+    formatar_data_hora,
+    formatar_numero,
+)
 from sistema.forms import (
+    ETAPAS_DE_LANCAMENTO,
     AutorizacaoAmbientalForm,
     AutorizacaoAmbientalGestorForm,
     BoxLenhaForm,
@@ -49,6 +60,8 @@ from sistema.forms import (
     FazendaGestorForm,
     FornecedorForm,
     FornecedorGestorForm,
+    FornecedorTarifaForm,
+    FornecedorTarifaGestorForm,
     FornoForm,
     FornoGestorForm,
     InventarioFlorestalForm,
@@ -62,6 +75,8 @@ from sistema.forms import (
     ParametroEmpresaForm,
     ParametroEmpresaGestorForm,
     ParametrosForm,
+    PlanejamentoFornoForm,
+    PlanejamentoFornoGestorForm,
     PlantioForm,
     PlantioGestorForm,
     ProprietarioForm,
@@ -76,6 +91,7 @@ from sistema.forms import (
     UPCGestorForm,
     UsuarioForm,
 )
+from sistema.menu import local_no_menu
 from sistema.models import (
     UPC,
     AutorizacaoAmbiental,
@@ -91,6 +107,7 @@ from sistema.models import (
     Expedicao,
     Fazenda,
     Fornecedor,
+    FornecedorTarifa,
     Forno,
     InventarioFlorestal,
     InventarioTalhao,
@@ -99,6 +116,7 @@ from sistema.models import (
     Municipio,
     ParametroEmpresa,
     Parametros,
+    PlanejamentoForno,
     Plantio,
     Proprietario,
     RegistroAuditavel,
@@ -107,6 +125,16 @@ from sistema.models import (
     TipoUsuario,
     TransporteLenha,
     Usuario,
+)
+from sistema.painel import (
+    ESTADOS_DO_DIA,
+    colheita_por_etapa,
+    consolidado_da_colheita,
+    desempenho_do_ciclo,
+    grade_do_mes,
+    graficos_dos_ultimos_dias,
+    indicadores_do_mes,
+    situacao_dos_fornos,
 )
 
 if TYPE_CHECKING:
@@ -119,6 +147,7 @@ MODELOS_POR_EMPRESA = (
     Fazenda,
     Proprietario,
     Fornecedor,
+    FornecedorTarifa,
     Plantio,
     Talhao,
     UPC,
@@ -137,6 +166,7 @@ MODELOS_POR_EMPRESA = (
     Forno,
     BoxLenha,
     CicloForno,
+    PlanejamentoForno,
     LancamentoCusto,
     LancamentoCustoRateio,
 )
@@ -148,6 +178,7 @@ FORMULARIOS_DO_GESTOR = {
     Forno: FornoGestorForm,
     BoxLenha: BoxLenhaGestorForm,
     CicloForno: CicloFornoGestorForm,
+    PlanejamentoForno: PlanejamentoFornoGestorForm,
     CentroCusto: CentroCustoGestorForm,
     CategoriaCusto: CategoriaCustoGestorForm,
     Equipamento: EquipamentoGestorForm,
@@ -161,6 +192,7 @@ FORMULARIOS_DO_GESTOR = {
     Fazenda: FazendaGestorForm,
     Proprietario: ProprietarioGestorForm,
     Fornecedor: FornecedorGestorForm,
+    FornecedorTarifa: FornecedorTarifaGestorForm,
     Plantio: PlantioGestorForm,
     Talhao: TalhaoGestorForm,
     UPC: UPCGestorForm,
@@ -194,10 +226,27 @@ FILTROS_POR_UPC = {
     Forno: lambda upcs: Q(upc__in=upcs),
     BoxLenha: lambda upcs: Q(upc__in=upcs),
     CicloForno: lambda upcs: Q(forno__upc__in=upcs),
+    PlanejamentoForno: lambda upcs: Q(forno__upc__in=upcs),
 }
 
 
 RECURSOS: dict[str, dict[str, Any]] = {
+    "tarifas-fornecedor": {
+        "titulo": "Tarifas de fornecedor",
+        "modelo": FornecedorTarifa,
+        "formulario": FornecedorTarifaForm,
+        "colunas": [
+            ("Fornecedor", "fornecedor"),
+            ("Serviço", "get_tipo_servico_display"),
+            ("Unidade", "get_unidade_display"),
+            ("Valor (R$)", "valor"),
+            ("Vigente de", "vigencia_inicio"),
+            ("Até", "vigencia_fim"),
+            ("Empresa", "empresa"),
+        ],
+        "busca": ["fornecedor__nome_razao_social", "tipo_servico", "observacao"],
+        "somente_admin": False,
+    },
     "lancamentos-custo": {
         "titulo": "Lançamentos de custo",
         "modelo": LancamentoCusto,
@@ -276,8 +325,8 @@ RECURSOS: dict[str, dict[str, Any]] = {
         "formulario": FornoForm,
         "colunas": [
             ("UPC", "upc"),
-            ("Forno", "numero"),
-            ("Tipo", "tipo_forno"),
+            ("Forno", "identificacao"),
+            ("Tipo", "formato"),
             ("MDC por ciclo", "capacidade_efetiva_mdc"),
             ("Situação", "get_situacao_display"),
             ("Empresa", "empresa"),
@@ -306,15 +355,18 @@ RECURSOS: dict[str, dict[str, Any]] = {
         "modelo": CicloForno,
         "formulario": CicloFornoForm,
         "colunas": [
-            ("Forno", "forno"),
+            ("Forno", "forno_curto"),
             ("Ciclo", "numero_ciclo"),
-            ("Status", "get_status_display"),
+            ("Status", "status_legenda"),
             ("Enchimento", "data_inicio_enchimento"),
+            ("Resfriando", "data_fim_carbonizacao"),
             ("Descarga", "data_descarga"),
+            ("Previsto", "prevista_da_etapa"),
+            ("Prazo", "prazo_curto"),
             ("Lenha (MST)", "volume_lenha_enchimento"),
             ("Carvão (MDC)", "volume_mdc"),
             ("MST/MDC", "fator_mst_por_mdc"),
-            ("Alerta", "alerta_fator"),
+            ("Consumo", "alerta_fator_curto"),
             ("Empresa", "empresa"),
         ],
         "busca": [
@@ -323,6 +375,30 @@ RECURSOS: dict[str, dict[str, Any]] = {
             "fornecedor__nome_razao_social",
             "empresa__razao_social",
         ],
+        "filtro": (
+            "status",
+            (
+                ("CARBONIZACAO", "Carbonizando"),
+                ("RESFRIAMENTO", "Resfriando"),
+                ("DESCARREGADO", "Descarregados"),
+                ("CANCELADO", "Cancelados"),
+            ),
+        ),
+        "somente_admin": False,
+    },
+    "planejamentos-forno": {
+        "titulo": "Planejamento dos fornos",
+        "modelo": PlanejamentoForno,
+        "formulario": PlanejamentoFornoForm,
+        "colunas": [
+            ("Mês", "mes"),
+            ("Forno", "forno"),
+            ("Primeiro enchimento", "data_primeiro_enchimento"),
+            ("MDC por ciclo", "mdc_por_ciclo"),
+            ("Observação", "observacao"),
+            ("Empresa", "empresa"),
+        ],
+        "busca": ["forno__numero", "forno__upc__nome", "observacao"],
         "somente_admin": False,
     },
     "centros-custo": {
@@ -591,13 +667,16 @@ RECURSOS: dict[str, dict[str, Any]] = {
         "colunas": [
             ("Início", "data_inicio"),
             ("Fim", "data_fim"),
-            ("Inventário", "inventario"),
-            ("Sistema", "get_sistema_display"),
-            ("Equipamentos", "lista_equipamentos"),
             ("Talhão", "talhao"),
+            ("Etapa", "get_etapa_display"),
+            ("Empreiteiro", "fornecedor"),
+            ("Volume (m³)", "volume_m3"),
+            ("A fazer na etapa (m³)", "volume_a_fazer"),
             ("Área (ha)", "area_ha"),
-            ("Estoque em campo (m³)", "estoque_em_campo"),
-            ("Volume do inventário (m³)", "volume_inventario"),
+            ("m³/ha", "rendimento_m3_ha"),
+            ("Pago por", "get_unidade_pagamento_display"),
+            ("Valor unitário (R$)", "valor_unitario"),
+            ("Valor a pagar (R$)", "valor_total"),
             ("Empresa", "empresa"),
         ],
         "busca": [
@@ -605,6 +684,7 @@ RECURSOS: dict[str, dict[str, Any]] = {
             "inventario__fazenda__nome",
             "talhao__identificacao",
             "autorizacao__numero",
+            "fornecedor__nome_razao_social",
             "empresa__razao_social",
         ],
         "somente_admin": False,
@@ -656,16 +736,20 @@ RECURSOS: dict[str, dict[str, Any]] = {
         "somente_admin": False,
     },
     "parametros": {
-        "titulo": "Parâmetros",
+        "titulo": "Parâmetros do sistema",
         "modelo": Parametros,
         "formulario": ParametrosForm,
         "colunas": [
             ("Empresa", "empresa"),
-            ("Terminal", "terminal"),
             ("Idioma", "get_idioma_display"),
             ("Moeda", "simbolo_monetario"),
+            ("País", "get_pais_display"),
+            ("Data", "formato_data"),
+            ("Casas ha", "casas_decimais_ha"),
+            ("Casas volume", "casas_decimais_volume"),
+            ("Casas MDC", "casas_decimais_mdc"),
         ],
-        "busca": ["empresa__razao_social", "terminal"],
+        "busca": ["empresa__razao_social"],
         "somente_admin": True,
     },
     "estados": {
@@ -838,6 +922,7 @@ def inicio(request: HttpRequest) -> HttpResponse:
     resumo["upcs"] = upcs_visiveis(request).count()
     resumo["estados"] = Estado.objects.count()
     resumo["municipios_ibge"] = Municipio.objects.filter(ativo=True).count()
+    dashboard = _dashboard(request, empresa) if empresa is not None else None
     if administrador:
         empresas = usuario.empresas_permitidas()
         resumo.update(
@@ -854,7 +939,126 @@ def inicio(request: HttpRequest) -> HttpResponse:
             "administrador": administrador,
             "empresa": empresa,
             "resumo": resumo,
+            "dashboard": dashboard,
             "primeira_empresa": administrador and resumo["empresas"] == 0,
+        },
+    )
+
+
+def _fornos_visiveis(request: HttpRequest, empresa: Empresa) -> QuerySet[Forno]:
+    return restringir_por_upc(
+        Forno.objects.filter(empresa=empresa, upc__in=upcs_visiveis(request)), request
+    )
+
+
+def _dashboard(request: HttpRequest, empresa: Empresa) -> dict[str, Any]:
+    """Ciclo dos fornos, indicadores do mês e gráficos dos últimos 30 dias."""
+    parametros = Parametros.da_empresa(empresa)
+    hoje = timezone.localdate()
+    inicio_mes = hoje.replace(day=1)
+    fornos = _fornos_visiveis(request, empresa)
+    indicadores = indicadores_do_mes(empresa.pk, fornos, inicio_mes, hoje)
+    previsto = grade_do_mes(fornos, hoje.year, hoje.month, parametros)[
+        "total_mdc_pl_valor"
+    ]
+
+    mdc, vol = parametros.casas_decimais_mdc, parametros.casas_decimais_volume
+    ha = parametros.casas_decimais_ha
+
+    referencias = ParametroEmpresa.da_empresa(empresa.pk)
+    nota_fator = (
+        f"MST por MDC (referência "
+        f"{formatar_numero(referencias.fator_mst_por_mdc_ideal, parametros, 2)})"
+    )
+    nota_producao = (
+        f"MDC de {formatar_numero(previsto, parametros, mdc)} previstos no mês"
+        if previsto
+        else "MDC descarregado"
+    )
+
+    def numero(chave: str, casas: int) -> str:
+        valor = indicadores[chave]
+        return "—" if valor is None else formatar_numero(valor, parametros, casas)
+
+    return {
+        "mes": inicio_mes,
+        "fornos": situacao_dos_fornos(fornos),
+        "ve_ciclos": usuario_pode_acessar(request.user, "ciclos-forno"),
+        "indicadores": [
+            (titulo, numero(chave, casas), nota)
+            for titulo, chave, casas, nota in (
+                ("Produção no mês", "producao_mdc", mdc, nota_producao),
+                ("Lenha enfornada", "lenha_enfornada_mst", vol, "MST nos enchimentos"),
+                ("Consumo de lenha", "fator_mst_mdc", 2, nota_fator),
+                ("Lenha transportada", "lenha_transportada_mst", vol, "MST na praça"),
+                ("Carvão expedido", "expedido", mdc, "Nas expedições do mês"),
+                ("Corte da colheita", "colheita_corte_ha", ha, "ha cortados no mês"),
+            )
+        ],
+        "graficos": graficos_dos_ultimos_dias(empresa.pk, fornos, hoje, parametros),
+        "colheita_por_etapa": colheita_por_etapa(
+            empresa.pk, inicio_mes, hoje, parametros
+        ),
+    }
+
+
+@login_required
+def consolidado_colheita(request: HttpRequest) -> HttpResponse:
+    """Por talhão: inventário, realizado e saldo por etapa, transporte e secagem."""
+    _configurar_recurso(request, "colheitas")
+    empresa = empresa_ativa(request)
+    if empresa is None:
+        proximo = urlencode({"proximo": request.get_full_path()})
+        return redirect(f"{reverse('selecionar_empresa')}?{proximo}")
+    talhoes = restringir_por_upc(Talhao.objects.filter(empresa=empresa), request)
+    consolidado = consolidado_da_colheita(
+        talhoes, timezone.localdate(), Parametros.da_empresa(empresa)
+    )
+    return render(
+        request, "sistema/consolidado_colheita.html", {"consolidado": consolidado}
+    )
+
+
+@login_required
+def painel_fornos(request: HttpRequest) -> HttpResponse:
+    """Grade do mês: o estado de cada forno em cada dia (V, L, C, R, D, M)."""
+    _configurar_recurso(request, "ciclos-forno")
+    empresa = empresa_ativa(request)
+    if empresa is None:
+        proximo = urlencode({"proximo": request.get_full_path()})
+        return redirect(f"{reverse('selecionar_empresa')}?{proximo}")
+    hoje = timezone.localdate()
+    try:
+        ano, mes = (int(parte) for parte in request.GET.get("mes", "").split("-"))
+        date(ano, mes, 1)
+    except ValueError:
+        ano, mes = hoje.year, hoje.month
+    parametros = Parametros.da_empresa(empresa)
+    grade = grade_do_mes(_fornos_visiveis(request, empresa), ano, mes, parametros)
+    ver = request.GET.get("ver", "ambos")
+    if ver not in {"ambos", "re", "pl"}:
+        ver = "ambos"
+    fim_mes = date(ano, mes, calendar.monthrange(ano, mes)[1])
+    desempenho = desempenho_do_ciclo(
+        _fornos_visiveis(request, empresa),
+        date(ano, mes, 1),
+        min(fim_mes, hoje) if fim_mes >= date(ano, mes, 1) else fim_mes,
+        ParametroEmpresa.da_empresa(empresa.pk),
+        parametros,
+    )
+    return render(
+        request,
+        "sistema/painel_fornos.html",
+        {
+            "grade": grade,
+            "estados": ESTADOS_DO_DIA,
+            "hoje": hoje,
+            "ver": ver,
+            "desempenho": desempenho,
+            "mes_atual": f"{ano:04d}-{mes:02d}",
+            "pode_planejar": usuario_pode_acessar(
+                request.user, "planejamentos-forno"
+            ),
         },
     )
 
@@ -917,6 +1121,9 @@ def talhoes_por_inventario(request: HttpRequest) -> JsonResponse:
         empresa_id=inventario.empresa_id,
         fazenda_id=inventario.fazenda_id,
     ).order_by("identificacao")
+    colheita = request.GET.get("colheita", "")
+    colheita_atual = int(colheita) if colheita.isdecimal() else None
+    etapa = request.GET.get("etapa", "")
     arvores_por_hectare = inventario.numero_arvores_ha
     if arvores_por_hectare is None and inventario.area_ha:
         arvores_por_hectare = inventario.numero_arvores / inventario.area_ha
@@ -935,6 +1142,22 @@ def talhoes_por_inventario(request: HttpRequest) -> JsonResponse:
                         if talhao.saldo_a_retirar_m3 is not None
                         else ""
                     ),
+                    "area_colhida_ha": str(
+                        Colheita.area_ja_colhida(
+                            talhao.pk, etapa, exceto=colheita_atual
+                        )
+                    ),
+                    "rendimento_m3_ha": str(
+                        Colheita.rendimento_do_talhao(talhao, inventario) or ""
+                    ),
+                    "volume_talhao_m3": str(
+                        Colheita.volume_do_talhao(talhao, inventario) or ""
+                    ),
+                    "volume_feito_m3": str(
+                        Colheita.volume_ja_feito(
+                            talhao.pk, etapa, exceto=colheita_atual
+                        )
+                    ),
                     "numero_arvores": (
                         str(
                             (arvores_por_hectare * talhao.area_ha).quantize(
@@ -947,6 +1170,34 @@ def talhoes_por_inventario(request: HttpRequest) -> JsonResponse:
                 }
                 for talhao in talhoes
             ]
+        }
+    )
+
+
+@login_required
+def tarifa_vigente(request: HttpRequest) -> JsonResponse:
+    """Tarifa do fornecedor para o serviço na data (preenche o lançamento)."""
+    _configurar_recurso(request, "colheitas")
+    empresa = empresa_ativa(request)
+    fornecedor = request.GET.get("fornecedor", "")
+    try:
+        data = date.fromisoformat(request.GET.get("data", ""))
+    except ValueError:
+        data = timezone.localdate()
+    if empresa is None or not fornecedor.isdecimal():
+        return JsonResponse({"tarifa": None})
+    tarifa = FornecedorTarifa.vigente(
+        int(fornecedor), request.GET.get("servico", ""), data
+    )
+    if tarifa is None or tarifa.empresa_id != empresa.pk:
+        return JsonResponse({"tarifa": None})
+    return JsonResponse(
+        {
+            "tarifa": {
+                "valor": str(tarifa.valor),
+                "unidade": tarifa.unidade,
+                "unidade_rotulo": tarifa.get_unidade_display(),
+            }
         }
     )
 
@@ -994,9 +1245,20 @@ def _configurar_recurso(request: HttpRequest, recurso: str) -> dict[str, Any]:
     return configuracao
 
 
-def _valor_de_exibicao(valor: object) -> str:
+def _valor_de_exibicao(
+    valor: object, campo: str = "", parametros: Parametros | None = None
+) -> str:
+    parametros = parametros or Parametros()
+    if isinstance(valor, SafeData):
+        return valor  # HTML montado pelo próprio sistema (ex.: legenda do status)
     if isinstance(valor, bool):
         return "Sim" if valor else "Não"
+    if isinstance(valor, datetime):
+        return formatar_data_hora(timezone.localtime(valor), parametros)
+    if isinstance(valor, date):
+        return formatar_data(valor, parametros)
+    if isinstance(valor, Decimal):
+        return formatar_numero(valor, parametros, casas_do_campo(campo, parametros))
     return str(valor) if valor not in (None, "") else "—"
 
 
@@ -1045,6 +1307,44 @@ def _recusar_empresa_encerrada(request: HttpRequest, recurso: str) -> HttpRespon
     return redirect("lista_registros", recurso=recurso)
 
 
+def _filtro_rapido(
+    request: HttpRequest, configuracao: dict[str, Any], objetos: QuerySet
+) -> dict[str, Any] | None:
+    """Botões de filtro por um campo (ex.: status do ciclo), com contagem."""
+    if "filtro" not in configuracao:
+        return None
+    campo, opcoes = configuracao["filtro"]
+    contagem = dict(
+        objetos.order_by().values_list(campo).annotate(total=Count("pk"))
+    )
+    validos = {valor for valor, _ in opcoes}
+    ativo = request.GET.get("filtro", "")
+    consulta = request.GET.copy()
+    consulta.pop("page", None)
+
+    def link(valor: str) -> str:
+        consulta["filtro"] = valor
+        if not valor:
+            consulta.pop("filtro")
+        texto = consulta.urlencode()
+        return f"?{texto}" if texto else "?"
+
+    return {
+        "campo": campo,
+        "ativo": ativo if ativo in validos else "",
+        "todos": {"total": sum(contagem.values()), "url": link("")},
+        "opcoes": [
+            {
+                "valor": valor,
+                "rotulo": rotulo,
+                "total": contagem.get(valor, 0),
+                "url": link(valor),
+            }
+            for valor, rotulo in opcoes
+        ],
+    }
+
+
 @login_required
 def lista_registros(request: HttpRequest, recurso: str) -> HttpResponse:
     configuracao = _configurar_recurso(request, recurso)
@@ -1056,17 +1356,23 @@ def lista_registros(request: HttpRequest, recurso: str) -> HttpResponse:
             filtros |= Q(**{f"{campo}__icontains": termo})
         objetos = objetos.filter(filtros)
     objetos = objetos.distinct()
+    filtro = _filtro_rapido(request, configuracao, objetos)
+    if filtro and filtro["ativo"]:
+        objetos = objetos.filter(**{filtro["campo"]: filtro["ativo"]})
     if not objetos.ordered:
         objetos = objetos.order_by("pk")
     pagina = Paginator(objetos, 25).get_page(request.GET.get("page"))
     # Os dados são sempre da empresa ativa: a coluna "Empresa" seria repetida.
     colunas = [coluna for coluna in configuracao["colunas"] if coluna[1] != "empresa"]
+    parametros = Parametros.da_empresa(empresa_ativa(request))
     linhas = [
         {
             "objeto": objeto,
             "valores": [
                 _valor_de_exibicao(
-                    valor() if callable(valor := getattr(objeto, campo)) else valor
+                    valor() if callable(valor := getattr(objeto, campo)) else valor,
+                    campo,
+                    parametros,
                 )
                 for _, campo in colunas
             ],
@@ -1083,6 +1389,8 @@ def lista_registros(request: HttpRequest, recurso: str) -> HttpResponse:
             "linhas": linhas,
             "pagina": pagina,
             "termo": termo,
+            "filtro": filtro,
+            "local_no_menu": local_no_menu(recurso),
             "somente_leitura": _somente_consulta(request, configuracao),
             "consulta_de_encerrada": _somente_consulta(request, configuracao)
             and not configuracao.get("somente_leitura"),
@@ -1215,6 +1523,47 @@ def _salvar_registro(formulario: ModelForm, registro: Model, usuario: Usuario) -
 
 
 @login_required
+def etapa_do_ciclo(request: HttpRequest, etapa: str) -> HttpResponse:
+    """Fim da carbonização ou descarga: um forno por vez, só os da etapa anterior."""
+    recurso = "ciclos-forno"
+    configuracao = _configurar_recurso(request, recurso)
+    formulario_class = ETAPAS_DE_LANCAMENTO.get(etapa)
+    if formulario_class is None:
+        raise Http404
+    if _somente_consulta(request, configuracao):
+        return _recusar_empresa_encerrada(request, recurso)
+    if empresa_ativa(request) is None:
+        proximo = urlencode({"proximo": request.get_full_path()})
+        return redirect(f"{reverse('selecionar_empresa')}?{proximo}")
+    ciclos = _queryset_recurso(request, configuracao).filter(
+        forno__upc__in=upcs_visiveis(request)
+    )
+    formulario = formulario_class(request.POST or None, ciclos=ciclos)
+    if request.method == "POST" and formulario.is_valid():
+        ciclo = formulario.aplicar()
+        ciclo.usuario_alteracao = usuario_autenticado(request)
+        ciclo.save()
+        mensagem = f"{ciclo.forno}: {formulario_class.titulo.lower()} lançada."
+        if ciclo.alerta_prazo:
+            messages.warning(request, f"{mensagem} {ciclo.alerta_prazo}.")
+        else:
+            messages.success(request, mensagem)
+        return redirect(request.path)
+    return render(
+        request,
+        "sistema/formulario.html",
+        {
+            "titulo": configuracao["titulo"],
+            "cabecalho": formulario_class.titulo,
+            "formulario": formulario,
+            "recurso": recurso,
+            "novo": True,
+            "rotulo_salvar": f"Lançar {formulario_class.titulo.lower()}",
+        },
+    )
+
+
+@login_required
 def formulario_registro(
     request: HttpRequest, recurso: str, pk: int | None = None
 ) -> HttpResponse:
@@ -1273,5 +1622,8 @@ def formulario_registro(
             "novo": instancia is None,
             "pk": pk,
             "pode_excluir": eh_administrador(usuario),
+            "fator_mst_por_m3": ParametroEmpresa.da_empresa(
+                empresa_fixa.pk if empresa_fixa else None
+            ).fator_mst_por_m3,
         },
     )
