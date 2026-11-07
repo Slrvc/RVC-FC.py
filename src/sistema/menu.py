@@ -42,6 +42,17 @@ SECOES_DO_MENU: tuple[tuple[str, str, str, tuple[Subsecao, ...]], ...] = (
                 ),
             ),
             (
+                "Fechamento",
+                (
+                    ("boletins-colheita", "Boletins de medição", "recibo"),
+                    (
+                        "tabelas-preco-colheita",
+                        "Tabelas de preço da colheita",
+                        "etiqueta",
+                    ),
+                ),
+            ),
+            (
                 "Relatórios",
                 (("@consolidado_colheita", "Consolidado da colheita", "tabela"),),
             ),
@@ -93,6 +104,10 @@ SECOES_DO_MENU: tuple[tuple[str, str, str, tuple[Subsecao, ...]], ...] = (
                     ("transportes-lenha", "Transporte de lenha", "caminhao"),
                     ("expedicoes", "Expedições de carvão", "enviar"),
                 ),
+            ),
+            (
+                "Fechamento",
+                (("boletins-transporte", "Boletins de transporte", "recibo"),),
             ),
         ),
     ),

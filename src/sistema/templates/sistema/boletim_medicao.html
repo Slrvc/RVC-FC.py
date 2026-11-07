@@ -1,0 +1,126 @@
+{% extends "sistema/base.html" %}
+{% block title %}Boletim de medição · {{ boletim.fornecedor }} · RVC-FC{% endblock %}
+{% block content %}
+  <div class="page-heading nao-imprimir">
+    <div>
+      <p class="eyebrow"><a href="{% url 'lista_registros' 'boletins-colheita' %}">Boletins de medição</a></p>
+      <h1>Boletim de medição · {{ boletim.data_emissao|date:"d/m/Y" }}</h1>
+      <p class="page-description">{{ boletim.fornecedor }} · lançamentos de {{ boletim.periodo_inicio|date:"d/m/Y" }} a {{ boletim.periodo_fim|date:"d/m/Y" }} · <strong>{{ boletim.get_status_display }}</strong></p>
+    </div>
+    <div class="heading-actions">
+      <a class="button button-secondary" href="{% url 'editar_registro' 'boletins-colheita' boletim.pk %}">Dados do boletim</a>
+      <button class="button button-secondary" type="button" onclick="window.print()">Imprimir</button>
+      {% if pode_editar %}
+        <button class="button" type="submit" form="form-boletim" name="acao" value="fechar">Fechar boletim</button>
+      {% elif boletim.status == "FECHADO" %}
+        <form method="post">{% csrf_token %}<button class="button button-secondary" type="submit" name="acao" value="reabrir">Reabrir</button></form>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if not boletim.tabela %}
+    <div class="flash-message nao-imprimir" role="status">Sem tabela de preço vigente para este empreiteiro na data de emissão: as linhas ficam sem valor.</div>
+  {% endif %}
+
+  <form id="form-boletim" method="post">
+    {% csrf_token %}
+    <section class="panel boletim">
+      <header class="boletim-titulo">
+        <h2>Faz. {{ boletim.fazendas }} – Boletim de Medição {{ boletim.fornecedor.nome_razao_social }}</h2>
+        {% if boletim.tabela %}<p class="nao-imprimir">Tabela de preço vigente desde {{ boletim.tabela.vigencia_inicio|date:"d/m/Y" }}{% if boletim.tabela.comprimento_tora_ate_5 %} · tora {{ boletim.tabela.comprimento_tora_ate_5 }} m (até 5%){% endif %}{% if boletim.tabela.comprimento_tora_acima_5 %} · {{ boletim.tabela.comprimento_tora_acima_5 }} m (acima de 5%){% endif %}</p>{% endif %}
+      </header>
+      <div class="table-wrap">
+        <table class="boletim-tabela tabela-numeros">
+          <thead>
+            <tr>
+              <th scope="col" rowspan="2" class="col-impressao">Emissão</th>
+              <th scope="col" rowspan="2" class="col-impressao">Mês ref.</th>
+              <th scope="col" rowspan="2">Talhão</th>
+              <th scope="col" rowspan="2">Fazenda</th>
+              <th scope="col" rowspan="2">Inclinação</th>
+              <th scope="col" rowspan="2">VMI</th>
+              <th scope="col" rowspan="2">Área total (ha)</th>
+              <th scope="col" rowspan="2">Vol. inv. (m³/ha)</th>
+              {% for etapa in etapas %}<th scope="colgroup" colspan="3" class="grupo">{{ etapa }}</th>{% endfor %}
+              <th scope="colgroup" colspan="3" class="grupo">Total (R$)</th>
+              <th scope="col" rowspan="2">R$ total</th>
+            </tr>
+            <tr>
+              {% for etapa in etapas %}<th scope="col">ha</th><th scope="col">R$/m³</th><th scope="col">m³</th>{% endfor %}
+              {% for etapa in etapas %}<th scope="col">{{ etapa|slice:":4" }}.</th>{% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for linha in linhas %}
+              <tr>
+                <td class="col-impressao">{{ boletim.data_emissao|date:"d/m/y" }}</td>
+                <td class="col-impressao">{{ boletim.data_emissao|date:"M"|lower }}</td>
+                <th scope="row">{{ linha.talhao.identificacao }}</th>
+                <td class="texto">{{ linha.talhao.fazenda.nome_curto }}</td>
+                <td>
+                  {% if pode_editar %}
+                    <select name="inclinacao_{{ linha.item.pk }}" aria-label="Inclinação do {{ linha.talhao.identificacao }}">
+                      {% for valor, rotulo in inclinacoes %}<option value="{{ valor }}"{% if linha.item.inclinacao == valor %} selected{% endif %}>{{ rotulo }}</option>{% endfor %}
+                    </select>
+                    <span class="so-impressao">{{ linha.item.get_inclinacao_display }}</span>
+                  {% else %}{{ linha.item.get_inclinacao_display }}{% endif %}
+                </td>
+                <td>{% if pode_editar %}<input class="campo-numero campo-vmi" name="vmi_{{ linha.item.pk }}" value="{{ linha.item.vmi|default_if_none:''|stringformat:'s' }}" inputmode="decimal" aria-label="VMI do {{ linha.talhao.identificacao }}"><span class="so-impressao">{{ linha.vmi }}</span>{% else %}{{ linha.vmi }}{% endif %}</td>
+                <td>{{ linha.area_total }}</td>
+                <td>{{ linha.volume_ha }}</td>
+                {% for etapa in linha.etapas %}
+                  {% if etapa %}
+                    <td>{% if pode_editar %}<input class="campo-numero" name="area_ha_{{ etapa.item.pk }}" value="{{ etapa.item.area_ha|stringformat:'s' }}" inputmode="decimal" aria-label="Área"><span class="so-impressao">{{ etapa.area }}</span>{% else %}{{ etapa.area }}{% endif %}</td>
+                    <td>{% if etapa.preco %}{{ etapa.preco }}{% else %}<span class="valor-alerta" title="Sem faixa de preço para este VMI e inclinação">—</span>{% endif %}</td>
+                    <td>{{ etapa.volume }}</td>
+                  {% else %}
+                    <td class="vazio">—</td><td class="vazio">—</td><td class="vazio">—</td>
+                  {% endif %}
+                {% endfor %}
+                {% for etapa in linha.etapas %}<td>{% if etapa %}{{ etapa.valor }}{% else %}—{% endif %}</td>{% endfor %}
+                <td><strong>{{ linha.valor }}</strong></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+          <tfoot>
+            <tr class="grade-total">
+              <th scope="row" colspan="2" class="col-impressao">TOTAL</th>
+              <th scope="row" colspan="6"><span class="so-tela">TOTAL</span></th>
+              {% for total in totais_volume %}<td></td><td></td><td>{{ total.volume }}</td>{% endfor %}
+              {% for total in totais_volume %}<td>{{ total.valor }}</td>{% endfor %}
+              <td><strong>R$ {{ total_valor }}</strong></td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
+      <div class="boletim-assinaturas">
+        <p class="boletim-elaborado">Elaborado por: {{ boletim.elaborado_por }}</p>
+        <div class="assinatura">
+          <span class="linha-assinatura"></span>
+          <strong>{{ boletim.fornecedor.nome_razao_social|upper }}</strong>
+          <small>{{ boletim.fornecedor.cpf_cnpj }}</small>
+        </div>
+        <div class="assinatura">
+          <span class="linha-assinatura"></span>
+          <strong>{{ boletim.empresa.razao_social|upper }}</strong>
+          <small>{{ boletim.empresa.cnpj }}</small>
+        </div>
+        <p class="boletim-validacao">A empresa {{ boletim.empresa.razao_social|upper }} por meio de seu preposto/representante legal valida, na data indicada abaixo, as medições constantes no presente Boletim de Medição.</p>
+        <p class="boletim-elaborado">Validado por: {{ boletim.validado_por }}</p>
+        <p class="boletim-local">{{ boletim.empresa.municipio.nome|default:"" }}, {{ boletim.data_emissao|date:"j" }} de {{ boletim.data_emissao|date:"F"|lower }} de {{ boletim.data_emissao|date:"Y" }}</p>
+        <div class="assinatura assinatura-centro">
+          <span class="linha-assinatura"></span>
+          <strong>{{ boletim.empresa.razao_social|upper }}</strong>
+          <small>{{ boletim.empresa.cnpj }}</small>
+        </div>
+      </div>
+    </section>
+    {% if pode_editar %}
+      <div class="form-actions nao-imprimir">
+        <button class="button button-secondary" type="submit" name="acao" value="salvar">Recalcular com os ajustes</button>
+        <span class="help-text">Ajuste a área, o VMI ou a inclinação de uma linha e recalcule. Ao fechar, o boletim não muda mais.</span>
+      </div>
+    {% endif %}
+  </form>
+{% endblock %}

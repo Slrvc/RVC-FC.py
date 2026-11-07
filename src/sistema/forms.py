@@ -1,6 +1,7 @@
 import json
+import re
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from itertools import pairwise
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,7 @@ from django.utils import timezone
 
 from sistema.formatacao import MASCARAS_POR_CAMPO, MENSAGENS, normalizar
 from sistema.models import (
+    ETAPAS_DO_BOLETIM,
     ETAPAS_POR_SISTEMA,
     PADROES_POR_PAIS,
     STATUS_CICLO_ATIVO,
@@ -18,6 +20,8 @@ from sistema.models import (
     UPC,
     AutorizacaoAmbiental,
     BaseVolume,
+    BoletimMedicao,
+    BoletimTransporte,
     BoxLenha,
     CategoriaCusto,
     CentroCusto,
@@ -30,11 +34,13 @@ from sistema.models import (
     Estado,
     EtapaColheita,
     Expedicao,
+    FaixaPrecoColheita,
     Fazenda,
     FormatoForno,
     Fornecedor,
     FornecedorTarifa,
     Forno,
+    Inclinacao,
     InventarioFlorestal,
     InventarioTalhao,
     LancamentoCusto,
@@ -52,7 +58,9 @@ from sistema.models import (
     RegimeSabado,
     SituacaoForno,
     StatusAutorizacao,
+    StatusBoletim,
     StatusCiclo,
+    TabelaPrecoColheita,
     Talhao,
     TipoEmpresa,
     TipoExecucao,
@@ -996,6 +1004,14 @@ class TalhaoForm(FormularioDaEmpresa, FormularioEmSecoes):
             ),
         ),
         (
+            "Medição da colheita",
+            (
+                "A inclinação escolhe a tabela de preço do boletim de medição. "
+                "VMI em branco: o do inventário."
+            ),
+            ("inclinacao", "vmi_medicao"),
+        ),
+        (
             "Localização",
             "Ponto central em graus decimais e polígono do shapefile.",
             ("latitude", "longitude", "geometria", "observacao"),
@@ -1011,6 +1027,8 @@ class TalhaoForm(FormularioDaEmpresa, FormularioEmSecoes):
             "identificacao",
             "area_ha",
             "volume_m3",
+            "inclinacao",
+            "vmi_medicao",
             "latitude",
             "longitude",
             "geometria",
@@ -1027,6 +1045,7 @@ class TalhaoForm(FormularioDaEmpresa, FormularioEmSecoes):
 
     def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
         super().__init__(*args, **kwargs)
+        self.fields["inclinacao"].required = False
         valor_fazenda = (
             self.data.get("fazenda")
             if self.is_bound
@@ -1058,6 +1077,8 @@ class TalhaoForm(FormularioDaEmpresa, FormularioEmSecoes):
 
     def clean(self):
         dados = super().clean()
+        if not dados.get("inclinacao"):
+            dados["inclinacao"] = Inclinacao.ATE_5
         fazenda, plantio = dados.get("fazenda"), dados.get("plantio")
         if fazenda and plantio and plantio.fazenda_id != fazenda.pk:
             self.add_error("plantio", "O plantio pertence a outra fazenda.")
@@ -1671,6 +1692,19 @@ class ExpedicaoGestorForm(ExpedicaoForm):
         fields = [campo for campo in ExpedicaoForm.Meta.fields if campo != "empresa"]
 
 
+def _recusar_viagem_de_boletim_fechado(viagem: TransporteLenha) -> None:
+    """Viagem de boletim de transporte fechado ou pago não muda mais."""
+    boletim = viagem.boletim if viagem.pk else None
+    if boletim is None or boletim.editavel:
+        return
+    situacao = boletim.get_status_display().lower()
+    mensagem = (
+        f"Esta viagem está no boletim de transporte de "
+        f"{boletim.data_emissao:%d/%m/%Y}, já {situacao}."
+    )
+    raise forms.ValidationError(mensagem)
+
+
 class TransporteLenhaForm(FormularioDaEmpresa, FormularioEmSecoes):
     campos_da_empresa = ("autorizacao", "talhao", "upc", "box_lenha", "fornecedor")
     secoes_campos = (
@@ -1744,6 +1778,7 @@ class TransporteLenhaForm(FormularioDaEmpresa, FormularioEmSecoes):
 
     def clean(self):
         dados = super().clean()
+        _recusar_viagem_de_boletim_fechado(self.instance)
         if dados.get("destino") == DestinoLenha.UPC:
             if not dados.get("upc"):
                 self.add_error("upc", "Informe a UPC de destino.")
@@ -2986,6 +3021,400 @@ ETAPAS_DE_LANCAMENTO = {
     "fim-carbonizacao": FimCarbonizacaoForm,
     "descarga": DescargaForm,
 }
+
+
+def _ler_faixas(texto: str) -> list[tuple[Decimal, Decimal, Decimal, Decimal]]:
+    """Linhas coladas do Excel: VMI, derrubada, arraste, traçamento (e o resto).
+
+    Aceita tabulação, ponto e vírgula ou espaços entre as colunas e vírgula
+    decimal. Linhas sem números (títulos) são ignoradas.
+    """
+    faixas = []
+    for numero_linha, linha in enumerate(texto.splitlines(), start=1):
+        partes = [
+            parte.strip().lstrip("><=≥ ").replace("R$", "").strip()
+            for parte in re.split(r"[\t;]+|\s{2,}|\s(?=[>\d])", linha.strip())
+        ]
+        numeros = []
+        for parte in partes:
+            if not parte:
+                continue
+            valor = parte.replace(".", "").replace(",", ".") if "," in parte else parte
+            try:
+                numeros.append(Decimal(valor))
+            except InvalidOperation:
+                continue
+        if not numeros:
+            continue
+        if len(numeros) < 4:
+            mensagem = (
+                f"Linha {numero_linha}: informe VMI, derrubada, arraste e traçamento."
+            )
+            raise forms.ValidationError(mensagem)
+        faixas.append(tuple(numeros[:4]))
+    return faixas
+
+
+def _faixas_em_texto(tabela: TabelaPrecoColheita, inclinacao: str) -> str:
+    return "\n".join(
+        "\t".join(
+            str(valor).replace(".", ",")
+            for valor in (
+                faixa.vmi_minimo.normalize(),
+                faixa.preco_derrubada.normalize(),
+                faixa.preco_arraste.normalize(),
+                faixa.preco_tracamento.normalize(),
+            )
+        )
+        for faixa in tabela.faixas.filter(inclinacao=inclinacao)
+    )
+
+
+class TabelaPrecoColheitaForm(FormularioDaEmpresa, FormularioEmSecoes):
+    campos_da_empresa = ("fornecedor",)
+    faixas_ate_5 = forms.CharField(
+        label="Faixas com inclinação até 5%",
+        widget=forms.Textarea(attrs={"rows": 9, "class": "texto-tabela"}),
+        help_text=(
+            "Cole do Excel uma linha por faixa: VMI, derrubada, arraste, "
+            "traçamento (R$/m³). Ex.: 0,33  11,57  10,25  13,12"
+        ),
+    )
+    faixas_acima_5 = forms.CharField(
+        label="Faixas com inclinação acima de 5%",
+        widget=forms.Textarea(attrs={"rows": 9, "class": "texto-tabela"}),
+        required=False,
+    )
+    secoes_campos = (
+        (
+            "Empreiteiro e vigência",
+            "O boletim usa a tabela vigente na data de emissão.",
+            ("empresa", "fornecedor", "vigencia_inicio", "vigencia_fim", "observacao"),
+        ),
+        (
+            "Faixas de VMI (R$ por m³)",
+            (
+                "O talhão usa a faixa de maior VMI que não passa do VMI dele "
+                "(VMI 0,34 usa a faixa 0,33)."
+            ),
+            (
+                "faixas_ate_5",
+                "comprimento_tora_ate_5",
+                "faixas_acima_5",
+                "comprimento_tora_acima_5",
+            ),
+        ),
+    )
+
+    class Meta:
+        model = TabelaPrecoColheita
+        fields = [
+            "empresa",
+            "fornecedor",
+            "vigencia_inicio",
+            "vigencia_fim",
+            "comprimento_tora_ate_5",
+            "comprimento_tora_acima_5",
+            "observacao",
+        ]
+        labels = {
+            "empresa": "Empresa/unidade",
+            "fornecedor": "Empreiteiro",
+            "vigencia_inicio": "Vigente a partir de",
+            "vigencia_fim": "Vigente até",
+            "observacao": "Observação",
+        }
+        widgets = {"vigencia_inicio": ENTRADA_DATA, "vigencia_fim": ENTRADA_DATA}
+
+    def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        super().__init__(*args, **kwargs)
+        self.fields["fornecedor"].queryset = self.fields[
+            "fornecedor"
+        ].queryset.filter(fornece_servico=True)
+        if self.instance.pk:
+            self.fields["faixas_ate_5"].initial = _faixas_em_texto(
+                self.instance, Inclinacao.ATE_5
+            )
+            self.fields["faixas_acima_5"].initial = _faixas_em_texto(
+                self.instance, Inclinacao.ACIMA_5
+            )
+        self.faixas: dict[str, list] = {}
+
+    def clean(self):
+        dados = super().clean()
+        inicio, fim = dados.get("vigencia_inicio"), dados.get("vigencia_fim")
+        if inicio and fim and fim < inicio:
+            self.add_error("vigencia_fim", "O fim é anterior ao início.")
+        for campo, inclinacao in (
+            ("faixas_ate_5", Inclinacao.ATE_5),
+            ("faixas_acima_5", Inclinacao.ACIMA_5),
+        ):
+            try:
+                faixas = _ler_faixas(dados.get(campo) or "")
+            except forms.ValidationError as erro:
+                self.add_error(campo, erro)
+                continue
+            vmis = [faixa[0] for faixa in faixas]
+            if len(set(vmis)) != len(vmis):
+                self.add_error(campo, "Há VMI repetido nas faixas.")
+            self.faixas[inclinacao] = faixas
+        if not self.faixas.get(Inclinacao.ATE_5) and "faixas_ate_5" not in self.errors:
+            self.add_error("faixas_ate_5", "Informe ao menos uma faixa.")
+        return dados
+
+    def salvar_extras(self, registro: TabelaPrecoColheita) -> None:
+        registro.faixas.all().delete()
+        FaixaPrecoColheita.objects.bulk_create(
+            FaixaPrecoColheita(
+                tabela=registro,
+                inclinacao=inclinacao,
+                vmi_minimo=vmi,
+                preco_derrubada=derrubada,
+                preco_arraste=arraste,
+                preco_tracamento=tracamento,
+            )
+            for inclinacao, faixas in self.faixas.items()
+            for vmi, derrubada, arraste, tracamento in faixas
+        )
+
+
+class TabelaPrecoColheitaGestorForm(TabelaPrecoColheitaForm):
+    class Meta(TabelaPrecoColheitaForm.Meta):
+        fields = _sem_empresa(TabelaPrecoColheitaForm.Meta.fields)
+
+
+class BoletimMedicaoForm(FormularioDaEmpresa, FormularioEmSecoes):
+    campos_da_empresa = ("fornecedor",)
+    secoes_campos = (
+        (
+            "Boletim",
+            (
+                "Entram os lançamentos de colheita do empreiteiro no período que "
+                "ainda não estão em outro boletim (derrubada, arraste e traçamento)."
+            ),
+            ("empresa", "fornecedor", "data_emissao", "periodo_inicio", "periodo_fim"),
+        ),
+        (
+            "Assinaturas e situação",
+            "Fechado, o boletim não muda mais; cancelado, os lançamentos voltam.",
+            (
+                "elaborado_por",
+                "validado_por",
+                "status",
+                "data_pagamento",
+                "observacao",
+            ),
+        ),
+    )
+
+    class Meta:
+        model = BoletimMedicao
+        fields = [
+            "empresa",
+            "fornecedor",
+            "data_emissao",
+            "periodo_inicio",
+            "periodo_fim",
+            "elaborado_por",
+            "validado_por",
+            "status",
+            "data_pagamento",
+            "observacao",
+        ]
+        labels = {
+            "empresa": "Empresa/unidade",
+            "fornecedor": "Empreiteiro",
+            "periodo_inicio": "Lançamentos de",
+            "periodo_fim": "Lançamentos até",
+            "elaborado_por": "Elaborado por",
+            "validado_por": "Validado por",
+            "data_pagamento": "Data do pagamento",
+            "observacao": "Observação",
+        }
+        widgets = {
+            "data_emissao": ENTRADA_DATA,
+            "periodo_inicio": ENTRADA_DATA,
+            "periodo_fim": ENTRADA_DATA,
+            "data_pagamento": ENTRADA_DATA,
+        }
+
+    def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        super().__init__(*args, **kwargs)
+        self.fields["fornecedor"].queryset = self.fields[
+            "fornecedor"
+        ].queryset.filter(fornece_servico=True)
+        if not self.instance.pk:
+            del self.fields["status"]
+            del self.fields["data_pagamento"]
+            self.fields["data_emissao"].initial = timezone.localdate()
+        else:
+            for nome in ("fornecedor", "periodo_inicio", "periodo_fim"):
+                self.fields[nome].disabled = True
+
+    def clean(self):
+        dados = super().clean()
+        inicio, fim = dados.get("periodo_inicio"), dados.get("periodo_fim")
+        if inicio and fim and fim < inicio:
+            self.add_error("periodo_fim", "O fim é anterior ao início.")
+        fornecedor, emissao = dados.get("fornecedor"), dados.get("data_emissao")
+        if self.instance.pk or not (fornecedor and emissao and inicio and fim):
+            if dados.get("status") == StatusBoletim.PAGO and not dados.get(
+                "data_pagamento"
+            ):
+                self.add_error("data_pagamento", "Informe a data do pagamento.")
+            return dados
+        if TabelaPrecoColheita.vigente(fornecedor.pk, emissao) is None:
+            self.add_error(
+                "fornecedor",
+                "Cadastre a tabela de preço deste empreiteiro vigente na emissão.",
+            )
+        existe = Colheita.objects.filter(
+            fornecedor=fornecedor,
+            boletim__isnull=True,
+            etapa__in=[etapa for etapa, _, _ in ETAPAS_DO_BOLETIM],
+            data_inicio__range=(inicio, fim),
+        ).exists()
+        if not existe:
+            self.add_error(
+                "periodo_fim",
+                "Não há lançamentos de colheita deste empreiteiro no período "
+                "fora de outro boletim.",
+            )
+        return dados
+
+    def salvar_extras(self, registro: BoletimMedicao) -> None:
+        if not registro.itens.exists() and registro.status == StatusBoletim.ABERTO:
+            registro.gerar_itens()
+        if registro.status == StatusBoletim.CANCELADO:
+            registro.liberar_lancamentos()
+
+
+class BoletimMedicaoGestorForm(BoletimMedicaoForm):
+    class Meta(BoletimMedicaoForm.Meta):
+        fields = _sem_empresa(BoletimMedicaoForm.Meta.fields)
+
+
+class BoletimTransporteForm(FormularioDaEmpresa, FormularioEmSecoes):
+    campos_da_empresa = ("fornecedor",)
+    secoes_campos = (
+        (
+            "Boletim",
+            (
+                "Entram as viagens terceirizadas da transportadora no período que "
+                "ainda não estão em outro boletim. Sem valor na viagem, vale a "
+                "tarifa de transporte de lenha vigente na data."
+            ),
+            ("empresa", "fornecedor", "data_emissao", "periodo_inicio", "periodo_fim"),
+        ),
+        (
+            "Descontos e adiantamento",
+            "Líquido a pagar = valor das viagens - desconto - adiantamento.",
+            ("valor_desconto", "motivo_desconto", "valor_adiantamento"),
+        ),
+        (
+            "Assinaturas e situação",
+            "Fechado, o boletim e as viagens dele não mudam mais.",
+            (
+                "elaborado_por",
+                "validado_por",
+                "status",
+                "data_pagamento",
+                "observacao",
+            ),
+        ),
+    )
+
+    class Meta:
+        model = BoletimTransporte
+        fields = [
+            "empresa",
+            "fornecedor",
+            "data_emissao",
+            "periodo_inicio",
+            "periodo_fim",
+            "valor_desconto",
+            "motivo_desconto",
+            "valor_adiantamento",
+            "elaborado_por",
+            "validado_por",
+            "status",
+            "data_pagamento",
+            "observacao",
+        ]
+        labels = {
+            "empresa": "Empresa/unidade",
+            "fornecedor": "Transportadora",
+            "periodo_inicio": "Viagens de",
+            "periodo_fim": "Viagens até",
+            "motivo_desconto": "Motivo do desconto",
+            "elaborado_por": "Elaborado por",
+            "validado_por": "Validado por",
+            "data_pagamento": "Data do pagamento",
+            "observacao": "Observação",
+        }
+        help_texts = {"motivo_desconto": "Quebra, avaria, multa..."}
+        widgets = {
+            "data_emissao": ENTRADA_DATA,
+            "periodo_inicio": ENTRADA_DATA,
+            "periodo_fim": ENTRADA_DATA,
+            "data_pagamento": ENTRADA_DATA,
+        }
+
+    def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        super().__init__(*args, **kwargs)
+        self.fields["fornecedor"].queryset = self.fields[
+            "fornecedor"
+        ].queryset.filter(fornece_servico=True)
+        if not self.instance.pk:
+            del self.fields["status"]
+            del self.fields["data_pagamento"]
+            self.fields["data_emissao"].initial = timezone.localdate()
+        else:
+            for nome in ("fornecedor", "periodo_inicio", "periodo_fim"):
+                self.fields[nome].disabled = True
+
+    def clean(self):
+        dados = super().clean()
+        inicio, fim = dados.get("periodo_inicio"), dados.get("periodo_fim")
+        if inicio and fim and fim < inicio:
+            self.add_error("periodo_fim", "O fim é anterior ao início.")
+        for campo in ("valor_desconto", "valor_adiantamento"):
+            valor = dados.get(campo)
+            if valor is not None and valor < 0:
+                self.add_error(campo, "Informe um valor positivo.")
+        if dados.get("valor_desconto") and not dados.get("motivo_desconto"):
+            self.add_error("motivo_desconto", "Informe o motivo do desconto.")
+        if dados.get("status") == StatusBoletim.PAGO and not dados.get(
+            "data_pagamento"
+        ):
+            self.add_error("data_pagamento", "Informe a data do pagamento.")
+        fornecedor = dados.get("fornecedor")
+        if not self.instance.pk and fornecedor and inicio and fim:
+            existe = TransporteLenha.objects.filter(
+                fornecedor=fornecedor,
+                tipo_transporte=TipoTransporte.TERCEIRIZADO,
+                boletim__isnull=True,
+                data_transporte__range=(inicio, fim),
+            ).exists()
+            if not existe:
+                self.add_error(
+                    "periodo_fim",
+                    "Não há viagens terceirizadas desta transportadora no período "
+                    "fora de outro boletim.",
+                )
+        return dados
+
+    def salvar_extras(self, registro: BoletimTransporte) -> None:
+        if registro.status == StatusBoletim.CANCELADO:
+            registro.liberar_viagens()
+        elif not registro.viagens.exists() and registro.status == StatusBoletim.ABERTO:
+            registro.gerar()
+        registro.recalcular()
+
+
+class BoletimTransporteGestorForm(BoletimTransporteForm):
+    class Meta(BoletimTransporteForm.Meta):
+        fields = _sem_empresa(BoletimTransporteForm.Meta.fields)
 
 
 class PlanejamentoFornoForm(FormularioDaEmpresa, FormularioEmSecoes):

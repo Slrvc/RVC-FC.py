@@ -1904,3 +1904,262 @@ tbody tr:hover {
     height: auto;
   }
 }
+
+/* Painel dos fornos: a grade ocupa a largura da tela e cresce com ela. */
+.grade-fornos {
+  width: 100%;
+  min-width: 860px;
+  table-layout: fixed;
+  font-size: clamp(0.72rem, 0.55rem + 0.3vw, 0.9rem);
+}
+.grade-fornos th,
+.grade-fornos td {
+  width: auto;
+  min-width: 0;
+  max-width: none;
+  padding: 2px 1px;
+}
+.grade-fornos .grade-forno {
+  width: 5.75rem;
+  padding: 2px 0.6rem;
+}
+.grade-fornos .grade-tipo-col {
+  width: 2rem;
+}
+.grade-fornos .grade-total-col {
+  width: 4.5rem;
+}
+.grade-fornos .grade-numero {
+  font-size: 0.85em;
+}
+.grade-wrap .estado-celula,
+.table-wrap.grade-wrap td .estado-celula {
+  width: 100%;
+  max-width: 2.6rem;
+  height: clamp(1.45rem, 0.9rem + 1vw, 2.2rem);
+  margin: 0;
+  font-size: clamp(0.7rem, 0.5rem + 0.45vw, 1rem);
+}
+.grade-fornos thead th span {
+  font-size: 1.05em;
+}
+
+/* Painel dos fornos: letras maiores. */
+.grade-fornos {
+  font-size: clamp(0.82rem, 0.62rem + 0.35vw, 1rem);
+}
+.grade-fornos .grade-forno {
+  width: 6.25rem;
+  font-size: 0.95em;
+  font-weight: 700;
+}
+.grade-fornos .grade-tipo {
+  font-size: 0.72em;
+}
+.grade-fornos .grade-numero {
+  font-size: 0.92em;
+}
+.grade-wrap .estado-celula,
+.table-wrap.grade-wrap td .estado-celula {
+  font-size: clamp(0.82rem, 0.6rem + 0.5vw, 1.12rem);
+}
+
+/* Boletim de medição */
+.boletim {
+  padding: 1rem 1.1rem 1.25rem;
+}
+.boletim-titulo h2 {
+  margin: 0 0 0.25rem;
+  font-size: 1.05rem;
+  text-align: center;
+}
+.boletim-titulo p {
+  margin: 0 0 0.75rem;
+  color: var(--ink-muted);
+  font-size: 0.8rem;
+  text-align: center;
+}
+.boletim-tabela th,
+.boletim-tabela td {
+  padding: 0.4rem 0.45rem;
+  font-size: 0.78rem;
+}
+.boletim-tabela thead th {
+  font-size: 0.64rem;
+  text-align: center;
+  white-space: normal;
+}
+.boletim-tabela td.texto {
+  text-align: left;
+}
+.boletim-tabela select,
+.boletim-tabela .campo-numero {
+  width: 5.5rem;
+  min-height: 30px;
+  padding: 0.2rem 0.35rem;
+  border: 1px solid #d6dfd7;
+  border-radius: 6px;
+  font: inherit;
+  text-align: right;
+}
+.boletim-tabela select {
+  width: 7rem;
+  text-align: left;
+}
+.boletim-assinaturas {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem 3rem;
+  margin-top: 1.75rem;
+  font-size: 0.82rem;
+}
+.boletim-elaborado,
+.boletim-validacao,
+.boletim-local {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+.boletim-local {
+  text-align: center;
+}
+.assinatura {
+  display: grid;
+  justify-items: center;
+  gap: 0.15rem;
+  padding-top: 2rem;
+  text-align: center;
+}
+.assinatura-centro {
+  grid-column: 1 / -1;
+  justify-self: center;
+  min-width: 50%;
+}
+.linha-assinatura {
+  width: 100%;
+  border-top: 1px solid #1c2b22;
+}
+.assinatura small {
+  color: var(--ink-muted);
+}
+
+@media print {
+  @page {
+    size: A4 landscape;
+    margin: 10mm;
+  }
+  body,
+  :root {
+    background: #fff;
+  }
+  .topbar,
+  .sidebar,
+  .footer,
+  .nao-imprimir,
+  .flash-message {
+    display: none !important;
+  }
+  .app-shell {
+    display: block;
+  }
+  .main-content {
+    padding: 0;
+  }
+  .panel {
+    border: 0;
+    box-shadow: none;
+  }
+  .table-wrap {
+    overflow: visible;
+  }
+  .boletim-tabela th,
+  .boletim-tabela td {
+    padding: 0.2rem 0.25rem;
+    font-size: 7.5pt;
+  }
+  tbody tr:hover {
+    background: none;
+  }
+}
+.field textarea.texto-tabela {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+  white-space: pre;
+}
+
+.so-impressao {
+  display: none;
+}
+.boletim-tabela select {
+  width: 6rem;
+}
+.boletim-tabela .campo-numero {
+  width: 5.2rem;
+}
+.boletim-tabela .campo-vmi {
+  width: 4.2rem;
+}
+.boletim-tabela td.vazio {
+  color: #b8c2ba;
+}
+@media print {
+  .boletim-tabela select,
+  .boletim-tabela input {
+    display: none;
+  }
+  .so-impressao {
+    display: inline;
+  }
+  .boletim-tabela {
+    width: 100%;
+  }
+  .boletim-tabela th,
+  .boletim-tabela td {
+    padding: 0.15rem 0.2rem;
+    font-size: 6.6pt;
+    white-space: nowrap;
+  }
+  .boletim-tabela thead th {
+    font-size: 5.8pt;
+    white-space: normal;
+  }
+}
+
+.boletim-tabela .col-impressao {
+  display: none;
+}
+@media print {
+  .boletim-tabela .col-impressao {
+    display: table-cell;
+  }
+  .so-tela {
+    display: none;
+  }
+}
+.boletim-resumo {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(16rem, 1fr);
+  gap: 1.25rem;
+  align-items: start;
+  margin-bottom: 1rem;
+}
+.boletim-totais th {
+  text-align: left;
+}
+.boletim-totais small {
+  color: var(--ink-muted);
+  font-weight: 500;
+}
+.boletim-subtitulo {
+  margin: 0.5rem 0 0.4rem;
+  font-size: 0.9rem;
+}
+@media (max-width: 900px) {
+  .boletim-resumo {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media print {
+  .boletim-resumo {
+    grid-template-columns: 1.6fr 1fr;
+  }
+}

@@ -4,6 +4,8 @@ from django.urls import path
 from sistema.views import (
     LoginSistemaView,
     TrocarSenhaView,
+    boletim_medicao,
+    boletim_transporte,
     consolidado_colheita,
     etapa_do_ciclo,
     excluir_registro,
@@ -47,6 +49,14 @@ urlpatterns = [
         name="etapa_do_ciclo",
     ),
     path("painel/fornos/", painel_fornos, name="painel_fornos"),
+    path(
+        "transporte/boletins/<int:pk>/",
+        boletim_transporte,
+        name="boletim_transporte",
+    ),
+    path(
+        "colheita/boletins/<int:pk>/", boletim_medicao, name="boletim_medicao"
+    ),
     path(
         "painel/colheita/", consolidado_colheita, name="consolidado_colheita"
     ),

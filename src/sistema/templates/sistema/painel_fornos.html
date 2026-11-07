@@ -90,17 +90,17 @@
           <thead>
             <tr>
               <th scope="col" class="grade-forno">Forno</th>
-              {% if ver == "ambos" %}<th scope="col"></th>{% endif %}
+              {% if ver == "ambos" %}<th scope="col" class="grade-tipo-col"></th>{% endif %}
               {% for dia in grade.dias %}
                 <th scope="col" class="{% if dia.data == hoje %}grade-hoje{% endif %}"><span>{{ dia.numero }}</span><small>{{ dia.semana }}</small></th>
               {% endfor %}
-              <th scope="col">Ciclos</th>
-              <th scope="col">MDC</th>
+              <th scope="col" class="grade-total-col">Ciclos</th>
+              <th scope="col" class="grade-total-col">MDC</th>
             </tr>
           </thead>
           <tbody>
             {% for linha in grade.linhas %}
-              {% if linha.nova_upc %}
+              {% if linha.nova_upc and grade.varias_upcs %}
                 <tr class="grade-upc"><th scope="rowgroup" colspan="{{ grade.dias|length|add:4 }}">{{ linha.forno.upc }}</th></tr>
               {% endif %}
               {% if ver != "re" %}

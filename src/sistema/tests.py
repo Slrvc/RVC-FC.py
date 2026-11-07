@@ -42,6 +42,8 @@ from sistema.forms import (
 from sistema.models import (
     UPC,
     AutorizacaoAmbiental,
+    BoletimMedicao,
+    BoletimTransporte,
     BoxLenha,
     CategoriaCusto,
     CentroCusto,
@@ -64,9 +66,11 @@ from sistema.models import (
     Plantio,
     Proprietario,
     StatusCiclo,
+    TabelaPrecoColheita,
     Talhao,
     TipoExecucao,
     TipoForno,
+    TransporteLenha,
     Usuario,
 )
 from sistema.painel import grade_do_mes
@@ -2004,6 +2008,192 @@ class FluxoAdministrativoTests(TestCase):
         # Ao editar, o volume do próprio lançamento não conta como já feito.
         edicao = ColheitaGestorForm(dados, instance=colheita, empresa=self.empresa)
         self.assertTrue(edicao.is_valid(), edicao.errors)
+
+    def test_boletim_de_medicao_reproduz_o_fechamento_da_planilha(self):
+        inventario = InventarioFlorestal.objects.create(
+            empresa=self.empresa,
+            fazenda=self.fazenda_propria,
+            lote="LB",
+            data_inventario="2026-01-01",
+            responsavel_tecnico="Eng",
+            registro_conselho="CREA",
+            numero_art="AB",
+            area_ha="23.36",
+            usuario_inclusao=self.gestor,
+            volume_total="2452.1",
+            numero_arvores="7000",
+        )
+        talhao = Talhao.objects.create(
+            empresa=self.empresa,
+            fazenda=self.fazenda_propria,
+            identificacao="T3",
+            area_ha=Decimal("23.36"),
+            volume_m3=Decimal("2452.1"),
+            vmi_medicao=Decimal("0.34"),
+        )
+        empreiteiro = Fornecedor.objects.create(
+            empresa=self.empresa,
+            nome_razao_social="Reflorestar",
+            cpf_cnpj="07110640000101",
+            fornece_servico=True,
+        )
+        self.client.force_login(self.gestor)
+        tabela = self.client.post(
+            reverse("novo_registro", args=["tabelas-preco-colheita"]),
+            {
+                "fornecedor": empreiteiro.pk,
+                "vigencia_inicio": "2026-10-01",
+                "faixas_ate_5": (
+                    "Condição\tFaixa de VMI\tDerrubada\tArraste\tTraçamento\tTotal\n"
+                    ">\t0,33\t11,57\t10,25\t13,12\t34,94\n"
+                    ">\t0,3\t11,89\t10,57\t13,12\t35,58"
+                ),
+                "faixas_acima_5": "0,33 14,43 12,06 11,52",
+                "comprimento_tora_ate_5": "2.20",
+            },
+        )
+        self.assertEqual(tabela.status_code, 302)
+        self.assertEqual(TabelaPrecoColheita.objects.get().faixas.count(), 3)
+        Colheita.objects.create(
+            empresa=self.empresa,
+            inventario=inventario,
+            talhao=talhao,
+            etapa="CORTE_FELLER",
+            tipo_execucao="TERCEIRIZADA",
+            fornecedor=empreiteiro,
+            data_inicio=date(2026, 10, 23),
+            volume_m3=Decimal("2452.1"),
+        )
+        novo = reverse("novo_registro", args=["boletins-colheita"])
+        dados = {
+            "fornecedor": empreiteiro.pk,
+            "data_emissao": "2026-10-27",
+            "periodo_inicio": "2026-10-01",
+            "periodo_fim": "2026-10-31",
+        }
+        resposta = self.client.post(novo, dados)
+        boletim = BoletimMedicao.objects.get()
+        self.assertRedirects(resposta, reverse("boletim_medicao", args=[boletim.pk]))
+        item = boletim.itens.get()
+        self.assertEqual(item.area_ha, Decimal("23.3600"))
+        self.assertEqual(item.preco_m3, Decimal("11.57"))
+        self.assertEqual(item.volume_m3, Decimal("2452.099"))
+        self.assertEqual(boletim.valor_total, Decimal("28370.79"))
+        pagina = self.client.get(reverse("boletim_medicao", args=[boletim.pk]))
+        self.assertContains(pagina, "28.370,79")
+        self.assertContains(pagina, "REFLORESTAR")
+
+        # O lançamento já está neste boletim: não entra em outro.
+        repetido = self.client.post(novo, dados)
+        self.assertIn("periodo_fim", repetido.context["formulario"].errors)
+
+        # Inclinação acima de 5% troca a tabela; fechado, não muda mais.
+        url = reverse("boletim_medicao", args=[boletim.pk])
+        self.client.post(
+            url,
+            {
+                "acao": "salvar",
+                f"area_ha_{item.pk}": "23,36",
+                f"vmi_{item.pk}": "0,34",
+                f"inclinacao_{item.pk}": "ACIMA_5",
+            },
+        )
+        boletim.refresh_from_db()
+        self.assertEqual(boletim.itens.get().preco_m3, Decimal("14.43"))
+        self.client.post(url, {"acao": "fechar"})
+        boletim.refresh_from_db()
+        self.assertEqual(boletim.status, "FECHADO")
+        self.client.post(url, {"acao": "salvar", f"area_ha_{item.pk}": "1"})
+        self.assertEqual(boletim.itens.get().area_ha, Decimal("23.3600"))
+
+        # Cancelado, os lançamentos ficam livres para outro boletim.
+        self.client.post(
+            reverse("editar_registro", args=["boletins-colheita", boletim.pk]),
+            {**dados, "status": "CANCELADO"},
+        )
+        self.assertFalse(Colheita.objects.filter(boletim__isnull=False).exists())
+
+    def test_boletim_de_transporte_paga_as_viagens_da_transportadora(self):
+        upc, _ = self._criar_upc_com_forno()
+        talhao = Talhao.objects.create(
+            empresa=self.empresa,
+            fazenda=self.fazenda_propria,
+            identificacao="TT",
+            area_ha=Decimal("10"),
+        )
+        autorizacao = AutorizacaoAmbiental.objects.create(
+            empresa=self.empresa,
+            numero="DCF-T",
+            produto="LENHA",
+            volume_declarado=Decimal("1000"),
+            data_emissao=date(2026, 1, 1),
+            fazenda=self.fazenda_propria,
+        )
+        transportadora = Fornecedor.objects.create(
+            empresa=self.empresa,
+            nome_razao_social="Transportadora",
+            cpf_cnpj="22222222222",
+            fornece_servico=True,
+        )
+        FornecedorTarifa.objects.create(
+            empresa=self.empresa,
+            fornecedor=transportadora,
+            tipo_servico="TRANSPORTE_LENHA",
+            unidade="MST",
+            valor=Decimal("20"),
+            vigencia_inicio=date(2026, 1, 1),
+        )
+        viagens = [
+            TransporteLenha.objects.create(
+                empresa=self.empresa,
+                autorizacao=autorizacao,
+                talhao=talhao,
+                destino="UPC",
+                upc=upc,
+                tipo_transporte="TERCEIRIZADO",
+                fornecedor=transportadora,
+                data_transporte=date(2026, 8, dia),
+                volume_mst=Decimal("70"),
+                valor_mst=valor,
+            )
+            for dia, valor in ((5, None), (6, Decimal("22.50")), (7, None))
+        ]
+        self.client.force_login(self.gestor)
+        novo = reverse("novo_registro", args=["boletins-transporte"])
+        dados = {
+            "fornecedor": transportadora.pk,
+            "data_emissao": "2026-08-31",
+            "periodo_inicio": "2026-08-01",
+            "periodo_fim": "2026-08-31",
+            "valor_desconto": "100",
+            "motivo_desconto": "Avaria na carga",
+            "valor_adiantamento": "500",
+        }
+        resposta = self.client.post(novo, dados)
+        boletim = BoletimTransporte.objects.get()
+        self.assertRedirects(resposta, reverse("boletim_transporte", args=[boletim.pk]))
+        # Duas viagens pela tarifa (70 x 20) e uma pelo valor dela (70 x 22,50).
+        self.assertEqual(boletim.total_viagens, 3)
+        self.assertEqual(boletim.valor_bruto, Decimal("4375.00"))
+        self.assertEqual(boletim.valor_liquido, Decimal("3775.00"))
+        self.assertContains(
+            self.client.get(reverse("boletim_transporte", args=[boletim.pk])),
+            "3.775,00",
+        )
+        self.assertIn("periodo_fim", self.client.post(novo, dados).context["formulario"].errors)
+
+        url = reverse("boletim_transporte", args=[boletim.pk])
+        self.client.post(url, {"acao": "remover", "retirar": [viagens[2].pk]})
+        boletim.refresh_from_db()
+        self.assertEqual(boletim.total_viagens, 2)
+        self.assertEqual(boletim.valor_liquido, Decimal("2375.00"))
+
+        self.client.post(url, {"acao": "fechar"})
+        editar = self.client.post(
+            reverse("editar_registro", args=["transportes-lenha", viagens[0].pk]),
+            {"volume_mst": "1"},
+        )
+        self.assertContains(editar, "já fechado")
 
     def test_colheita_terceirizada_usa_tarifa_vigente_do_empreiteiro(self):
         inventario = InventarioFlorestal.objects.create(

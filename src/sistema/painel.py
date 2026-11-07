@@ -594,6 +594,7 @@ def grade_do_mes(  # noqa: C901
             formatar_numero(valor, parametros, casas) if valor else ""
             for valor in producao_dia
         ],
+        "varias_upcs": len(upcs) > 1,
         "total_ciclos": sum(linha["ciclos"] for linha in linhas),
         "total_mdc": formatar_numero(total_mdc, parametros, casas),
         "contagem_pl": [

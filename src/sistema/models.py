@@ -491,6 +491,20 @@ class Fazenda(RegistroAuditavel):
     def __str__(self) -> str:
         return self.nome
 
+    @property
+    def nome_curto(self) -> str:
+        """Sem "Fazenda" e com as preposições minúsculas: Lagoa dos Currais."""
+        nome = self.nome.strip()
+        if nome.upper().startswith("FAZENDA "):
+            nome = nome[8:]
+        palavras = [
+            palavra.lower()
+            if palavra.lower() in {"da", "das", "de", "do", "dos", "e"} and indice
+            else palavra.capitalize()
+            for indice, palavra in enumerate(nome.split())
+        ]
+        return " ".join(palavras)
+
 
 class SistemaColheita(models.TextChoices):
     MECANIZADA = "MECANIZADA", "Mecanizada"
@@ -713,6 +727,11 @@ class Plantio(RegistroAuditavel):
         return f"Plantio {self.codigo} - {self.fazenda}"
 
 
+class Inclinacao(models.TextChoices):
+    ATE_5 = "ATE_5", "Até 5%"
+    ACIMA_5 = "ACIMA_5", "Acima de 5%"
+
+
 class Talhao(RegistroAuditavel):
     codigo = models.BigAutoField(primary_key=True)
     empresa = models.ForeignKey(
@@ -732,6 +751,19 @@ class Talhao(RegistroAuditavel):
     area_ha = models.DecimalField(max_digits=12, decimal_places=4)
     volume_m3 = models.DecimalField(
         "Volume total (m³)", max_digits=12, decimal_places=3, null=True, blank=True
+    )
+    inclinacao = models.CharField(
+        "Inclinação do terreno",
+        max_length=10,
+        choices=Inclinacao.choices,
+        default=Inclinacao.ATE_5,
+    )
+    vmi_medicao = models.DecimalField(
+        "VMI para medição (m³/árvore)",
+        max_digits=8,
+        decimal_places=4,
+        null=True,
+        blank=True,
     )
     latitude = models.DecimalField(
         max_digits=10, decimal_places=7, null=True, blank=True
@@ -1433,6 +1465,14 @@ class TransporteLenha(RegistroAuditavel):
     valor_total = models.DecimalField(
         max_digits=12, decimal_places=2, null=True, editable=False
     )
+    boletim = models.ForeignKey(
+        "BoletimTransporte",
+        on_delete=models.SET_NULL,
+        related_name="viagens",
+        null=True,
+        blank=True,
+        editable=False,
+    )
     observacao = models.CharField(max_length=255, blank=True)
 
     class Meta:
@@ -1886,6 +1926,14 @@ class Colheita(RegistroAuditavel):
     valor_total = models.DecimalField(
         "Valor a pagar", max_digits=14, decimal_places=2, null=True, editable=False
     )
+    boletim = models.ForeignKey(
+        "BoletimMedicao",
+        on_delete=models.SET_NULL,
+        related_name="lancamentos",
+        null=True,
+        blank=True,
+        editable=False,
+    )
     latitude = models.DecimalField(
         max_digits=10, decimal_places=7, null=True, blank=True
     )
@@ -2040,6 +2088,267 @@ class InventarioTalhao(RegistroAuditavel):
         self.vmi = _dividir(self.volume_total, self.numero_arvores)
         super().save(*args, **kwargs)
 
+
+
+
+# Etapas que o boletim de medição paga e a coluna de preço de cada uma.
+ETAPAS_DO_BOLETIM = (
+    (EtapaColheita.CORTE_FELLER, "derrubada", "Derrubada"),
+    (EtapaColheita.ARRASTE, "arraste", "Arraste"),
+    (EtapaColheita.TRACAMENTO, "tracamento", "Traçamento"),
+)
+
+
+class TabelaPrecoColheita(RegistroAuditavel):
+    """Preços da colheita de um empreiteiro, por faixa de VMI e inclinação."""
+
+    codigo = models.BigAutoField(primary_key=True)
+    empresa = models.ForeignKey(
+        Empresa, on_delete=models.PROTECT, related_name="tabelas_preco_colheita"
+    )
+    fornecedor = models.ForeignKey(
+        Fornecedor, on_delete=models.PROTECT, related_name="tabelas_preco_colheita"
+    )
+    vigencia_inicio = models.DateField()
+    vigencia_fim = models.DateField(null=True, blank=True)
+    comprimento_tora_ate_5 = models.DecimalField(
+        "Tora traçada até 5% (m)",
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    comprimento_tora_acima_5 = models.DecimalField(
+        "Tora traçada acima de 5% (m)",
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    observacao = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        ordering = ["fornecedor__nome_razao_social", "-vigencia_inicio"]
+        verbose_name = "tabela de preço da colheita"
+        verbose_name_plural = "tabelas de preço da colheita"
+
+    def __str__(self) -> str:
+        return f"{self.fornecedor} - desde {self.vigencia_inicio:%d/%m/%Y}"
+
+    @classmethod
+    def vigente(cls, fornecedor_id: int, data) -> TabelaPrecoColheita | None:
+        return (
+            cls.objects.filter(fornecedor_id=fornecedor_id, vigencia_inicio__lte=data)
+            .filter(
+                models.Q(vigencia_fim__isnull=True) | models.Q(vigencia_fim__gte=data)
+            )
+            .order_by("-vigencia_inicio")
+            .first()
+        )
+
+    def faixa(self, inclinacao: str, vmi: Decimal | None) -> FaixaPrecoColheita | None:
+        """A faixa de maior VMI mínimo que não passa do VMI do talhão."""
+        if vmi is None:
+            return None
+        return (
+            self.faixas.filter(inclinacao=inclinacao, vmi_minimo__lte=vmi)
+            .order_by("-vmi_minimo")
+            .first()
+        )
+
+    def comprimento_tora(self, inclinacao: str) -> Decimal | None:
+        if inclinacao == Inclinacao.ACIMA_5:
+            return self.comprimento_tora_acima_5
+        return self.comprimento_tora_ate_5
+
+    def quantidade_faixas(self) -> int:
+        return self.faixas.count()
+
+
+class FaixaPrecoColheita(models.Model):
+    """Uma linha da tabela: a partir de um VMI, o R$/m³ de cada etapa."""
+
+    codigo = models.BigAutoField(primary_key=True)
+    tabela = models.ForeignKey(
+        TabelaPrecoColheita, on_delete=models.CASCADE, related_name="faixas"
+    )
+    inclinacao = models.CharField(max_length=10, choices=Inclinacao.choices)
+    vmi_minimo = models.DecimalField(max_digits=8, decimal_places=4)
+    preco_derrubada = models.DecimalField(max_digits=10, decimal_places=4)
+    preco_arraste = models.DecimalField(max_digits=10, decimal_places=4)
+    preco_tracamento = models.DecimalField(max_digits=10, decimal_places=4)
+
+    class Meta:
+        ordering = ["inclinacao", "-vmi_minimo"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tabela", "inclinacao", "vmi_minimo"],
+                name="faixa_preco_colheita_unica",
+            )
+        ]
+
+    def preco(self, chave: str) -> Decimal:
+        return getattr(self, f"preco_{chave}")
+
+
+class StatusBoletim(models.TextChoices):
+    ABERTO = "ABERTO", "Aberto"
+    FECHADO = "FECHADO", "Fechado"
+    PAGO = "PAGO", "Pago"
+    CANCELADO = "CANCELADO", "Cancelado"
+
+
+class BoletimMedicao(RegistroAuditavel):
+    """Fechamento da colheita de um empreiteiro (Boletim de Medição)."""
+
+    codigo = models.BigAutoField(primary_key=True)
+    empresa = models.ForeignKey(
+        Empresa, on_delete=models.PROTECT, related_name="boletins_medicao"
+    )
+    fornecedor = models.ForeignKey(
+        Fornecedor, on_delete=models.PROTECT, related_name="boletins_medicao"
+    )
+    data_emissao = models.DateField("Emissão")
+    periodo_inicio = models.DateField("Lançamentos de")
+    periodo_fim = models.DateField("até")
+    tabela = models.ForeignKey(
+        TabelaPrecoColheita,
+        on_delete=models.PROTECT,
+        related_name="boletins",
+        null=True,
+        blank=True,
+    )
+    status = models.CharField(
+        max_length=10, choices=StatusBoletim.choices, default=StatusBoletim.ABERTO
+    )
+    elaborado_por = models.CharField(max_length=100, blank=True)
+    validado_por = models.CharField(max_length=100, blank=True)
+    data_pagamento = models.DateField(null=True, blank=True)
+    valor_total = models.DecimalField(
+        max_digits=14, decimal_places=2, default=0, editable=False
+    )
+    observacao = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        ordering = ["-data_emissao", "-codigo"]
+        verbose_name = "boletim de medição"
+        verbose_name_plural = "boletins de medição"
+
+    def __str__(self) -> str:
+        return f"{self.fornecedor} - {self.data_emissao:%d/%m/%Y}"
+
+    @property
+    def editavel(self) -> bool:
+        return self.status == StatusBoletim.ABERTO
+
+    def fazendas(self) -> str:
+        fazendas = {
+            item.talhao.fazenda.pk: item.talhao.fazenda.nome_curto
+            for item in self.itens.select_related("talhao__fazenda")
+        }
+        return " / ".join(sorted(fazendas.values()))
+
+    def gerar_itens(self) -> None:
+        """Agrupa por talhão e etapa os lançamentos do período ainda sem boletim."""
+        self.tabela = TabelaPrecoColheita.vigente(self.fornecedor_id, self.data_emissao)
+        etapas = [etapa for etapa, _, _ in ETAPAS_DO_BOLETIM]
+        colheitas = Colheita.objects.filter(
+            empresa_id=self.empresa_id,
+            fornecedor_id=self.fornecedor_id,
+            boletim__isnull=True,
+            etapa__in=etapas,
+            data_inicio__range=(self.periodo_inicio, self.periodo_fim),
+        ).select_related("talhao", "inventario")
+        grupos: dict[tuple[int, str], list[Colheita]] = {}
+        for colheita in colheitas:
+            grupos.setdefault((colheita.talhao_id, colheita.etapa), []).append(colheita)
+        for (_, etapa), lancamentos in grupos.items():
+            primeiro = lancamentos[0]
+            item = ItemBoletim(
+                boletim=self,
+                talhao=primeiro.talhao,
+                etapa=etapa,
+                inclinacao=primeiro.talhao.inclinacao,
+                vmi=primeiro.talhao.vmi_medicao or _vmi_do_inventario(primeiro),
+                volume_inventario_ha=Colheita.rendimento_do_talhao(
+                    primeiro.talhao, primeiro.inventario
+                ),
+                area_ha=sum((c.area_ha or Decimal(0) for c in lancamentos), Decimal(0)),
+            )
+            item.save()
+            Colheita.objects.filter(pk__in=[c.pk for c in lancamentos]).update(
+                boletim=self
+            )
+        self.recalcular()
+
+    def recalcular(self) -> None:
+        for item in self.itens.all():
+            item.save()
+        total = self.itens.aggregate(total=models.Sum("valor"))["total"]
+        self.valor_total = total or Decimal(0)
+        BoletimMedicao.objects.filter(pk=self.pk).update(
+            tabela=self.tabela, valor_total=self.valor_total
+        )
+
+    def liberar_lancamentos(self) -> None:
+        Colheita.objects.filter(boletim=self).update(boletim=None)
+
+
+def _vmi_do_inventario(colheita: Colheita) -> Decimal | None:
+    por_talhao = (
+        InventarioTalhao.objects.filter(
+            inventario=colheita.inventario, talhao=colheita.talhao
+        )
+        .values_list("vmi", flat=True)
+        .first()
+    )
+    return por_talhao or colheita.inventario.vmi
+
+
+class ItemBoletim(models.Model):
+    """Linha do boletim: um talhão numa etapa."""
+
+    codigo = models.BigAutoField(primary_key=True)
+    boletim = models.ForeignKey(
+        BoletimMedicao, on_delete=models.CASCADE, related_name="itens"
+    )
+    talhao = models.ForeignKey(Talhao, on_delete=models.PROTECT, related_name="+")
+    etapa = models.CharField(max_length=20, choices=EtapaColheita.choices)
+    inclinacao = models.CharField(max_length=10, choices=Inclinacao.choices)
+    vmi = models.DecimalField(max_digits=8, decimal_places=4, null=True, blank=True)
+    volume_inventario_ha = models.DecimalField(
+        max_digits=12, decimal_places=3, null=True, blank=True
+    )
+    area_ha = models.DecimalField(max_digits=12, decimal_places=4)
+    volume_m3 = models.DecimalField(max_digits=14, decimal_places=3, default=0)
+    preco_m3 = models.DecimalField(
+        max_digits=10, decimal_places=4, null=True, blank=True
+    )
+    valor = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+
+    class Meta:
+        ordering = ["talhao__fazenda__nome", "talhao__identificacao", "etapa"]
+
+    def save(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        # Valor com o volume sem arredondar, como a planilha (Excel).
+        volume = (
+            self.area_ha * self.volume_inventario_ha
+            if self.volume_inventario_ha
+            else Decimal(0)
+        )
+        self.volume_m3 = volume.quantize(Decimal("0.001"))
+        tabela = self.boletim.tabela
+        chave = {etapa: coluna for etapa, coluna, _ in ETAPAS_DO_BOLETIM}.get(
+            self.etapa
+        )
+        faixa = tabela.faixa(self.inclinacao, self.vmi) if tabela and chave else None
+        self.preco_m3 = faixa.preco(chave) if faixa else None
+        self.valor = (
+            (volume * self.preco_m3).quantize(Decimal("0.01"))
+            if self.preco_m3 is not None
+            else Decimal(0)
+        )
+        super().save(*args, **kwargs)
 
 class TipoCentroCusto(models.TextChoices):
     UPC = "UPC", "UPC"
@@ -2383,3 +2692,105 @@ class LancamentoCustoRateio(RegistroAuditavel):
         if not self.lancamento.rateado:
             self.lancamento.rateado = True
             self.lancamento.save(update_fields=["rateado"])
+
+
+class BoletimTransporte(RegistroAuditavel):
+    """Fechamento do frete de lenha de uma transportadora, por período."""
+
+    codigo = models.BigAutoField(primary_key=True)
+    empresa = models.ForeignKey(
+        Empresa, on_delete=models.PROTECT, related_name="boletins_transporte"
+    )
+    fornecedor = models.ForeignKey(
+        Fornecedor, on_delete=models.PROTECT, related_name="boletins_transporte"
+    )
+    data_emissao = models.DateField("Emissão")
+    periodo_inicio = models.DateField("Viagens de")
+    periodo_fim = models.DateField("até")
+    status = models.CharField(
+        max_length=10, choices=StatusBoletim.choices, default=StatusBoletim.ABERTO
+    )
+    valor_desconto = models.DecimalField(
+        "Desconto (R$)", max_digits=12, decimal_places=2, default=0
+    )
+    motivo_desconto = models.CharField(max_length=100, blank=True)
+    valor_adiantamento = models.DecimalField(
+        "Adiantamento já pago (R$)", max_digits=12, decimal_places=2, default=0
+    )
+    elaborado_por = models.CharField(max_length=100, blank=True)
+    validado_por = models.CharField(max_length=100, blank=True)
+    data_pagamento = models.DateField(null=True, blank=True)
+    total_viagens = models.PositiveIntegerField(default=0, editable=False)
+    total_mst = models.DecimalField(
+        max_digits=14, decimal_places=3, default=0, editable=False
+    )
+    valor_bruto = models.DecimalField(
+        max_digits=14, decimal_places=2, default=0, editable=False
+    )
+    valor_liquido = models.DecimalField(
+        "Líquido a pagar", max_digits=14, decimal_places=2, default=0, editable=False
+    )
+    observacao = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        ordering = ["-data_emissao", "-codigo"]
+        verbose_name = "boletim de transporte"
+        verbose_name_plural = "boletins de transporte"
+
+    def __str__(self) -> str:
+        return f"{self.fornecedor} - {self.data_emissao:%d/%m/%Y}"
+
+    @property
+    def editavel(self) -> bool:
+        return self.status == StatusBoletim.ABERTO
+
+    def viagens_disponiveis(self) -> models.QuerySet[TransporteLenha]:
+        return TransporteLenha.objects.filter(
+            empresa_id=self.empresa_id,
+            fornecedor_id=self.fornecedor_id,
+            tipo_transporte=TipoTransporte.TERCEIRIZADO,
+            boletim__isnull=True,
+            data_transporte__range=(self.periodo_inicio, self.periodo_fim),
+        )
+
+    def gerar(self) -> None:
+        """Traz as viagens do período; sem valor, usa a tarifa vigente."""
+        for viagem in self.viagens_disponiveis():
+            if viagem.valor_mst is None and viagem.valor_m3 is None:
+                tarifa = FornecedorTarifa.vigente(
+                    self.fornecedor_id,
+                    TipoServico.TRANSPORTE_LENHA,
+                    viagem.data_transporte,
+                )
+                if tarifa is not None and tarifa.unidade == UnidadeTarifa.MST:
+                    viagem.valor_mst = tarifa.valor
+                elif tarifa is not None and tarifa.unidade == UnidadeTarifa.M3:
+                    viagem.valor_m3 = tarifa.valor
+            viagem.boletim = self
+            viagem.save()
+        self.recalcular()
+
+    def recalcular(self) -> None:
+        soma = self.viagens.aggregate(
+            quantidade=models.Count("pk"),
+            mst=models.Sum("volume_mst"),
+            valor=models.Sum("valor_total"),
+        )
+        self.total_viagens = soma["quantidade"] or 0
+        self.total_mst = soma["mst"] or Decimal(0)
+        self.valor_bruto = soma["valor"] or Decimal(0)
+        self.valor_liquido = (
+            self.valor_bruto - self.valor_desconto - self.valor_adiantamento
+        )
+        BoletimTransporte.objects.filter(pk=self.pk).update(
+            total_viagens=self.total_viagens,
+            total_mst=self.total_mst,
+            valor_bruto=self.valor_bruto,
+            valor_liquido=self.valor_liquido,
+        )
+
+    def liberar_viagens(self) -> None:
+        TransporteLenha.objects.filter(boletim=self).update(boletim=None)
+
+    def viagens_sem_valor(self) -> int:
+        return self.viagens.filter(valor_total__isnull=True).count()

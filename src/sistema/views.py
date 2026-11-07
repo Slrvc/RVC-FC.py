@@ -12,7 +12,7 @@ from django.contrib.auth.views import LoginView, PasswordChangeView
 from django.core.exceptions import PermissionDenied
 from django.core.paginator import Paginator
 from django.db import transaction
-from django.db.models import Count, Model, ProtectedError, Q
+from django.db.models import Count, Model, ProtectedError, Q, Sum
 from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse, reverse_lazy
@@ -37,6 +37,10 @@ from sistema.forms import (
     ETAPAS_DE_LANCAMENTO,
     AutorizacaoAmbientalForm,
     AutorizacaoAmbientalGestorForm,
+    BoletimMedicaoForm,
+    BoletimMedicaoGestorForm,
+    BoletimTransporteForm,
+    BoletimTransporteGestorForm,
     BoxLenhaForm,
     BoxLenhaGestorForm,
     CategoriaCustoForm,
@@ -81,6 +85,8 @@ from sistema.forms import (
     PlantioGestorForm,
     ProprietarioForm,
     ProprietarioGestorForm,
+    TabelaPrecoColheitaForm,
+    TabelaPrecoColheitaGestorForm,
     TalhaoForm,
     TalhaoGestorForm,
     TipoFornoForm,
@@ -93,8 +99,11 @@ from sistema.forms import (
 )
 from sistema.menu import local_no_menu
 from sistema.models import (
+    ETAPAS_DO_BOLETIM,
     UPC,
     AutorizacaoAmbiental,
+    BoletimMedicao,
+    BoletimTransporte,
     BoxLenha,
     CategoriaCusto,
     CentroCusto,
@@ -109,6 +118,7 @@ from sistema.models import (
     Fornecedor,
     FornecedorTarifa,
     Forno,
+    Inclinacao,
     InventarioFlorestal,
     InventarioTalhao,
     LancamentoCusto,
@@ -120,6 +130,8 @@ from sistema.models import (
     Plantio,
     Proprietario,
     RegistroAuditavel,
+    StatusBoletim,
+    TabelaPrecoColheita,
     Talhao,
     TipoForno,
     TipoUsuario,
@@ -156,7 +168,10 @@ MODELOS_POR_EMPRESA = (
     AutorizacaoAmbiental,
     Expedicao,
     TransporteLenha,
+    BoletimTransporte,
     Colheita,
+    TabelaPrecoColheita,
+    BoletimMedicao,
     CentroCusto,
     CategoriaCusto,
     Equipamento,
@@ -184,7 +199,10 @@ FORMULARIOS_DO_GESTOR = {
     Equipamento: EquipamentoGestorForm,
     Cliente: ClienteGestorForm,
     Colheita: ColheitaGestorForm,
+    TabelaPrecoColheita: TabelaPrecoColheitaGestorForm,
+    BoletimMedicao: BoletimMedicaoGestorForm,
     TransporteLenha: TransporteLenhaGestorForm,
+    BoletimTransporte: BoletimTransporteGestorForm,
     Expedicao: ExpedicaoGestorForm,
     AutorizacaoAmbiental: AutorizacaoAmbientalGestorForm,
     InventarioFlorestal: InventarioFlorestalGestorForm,
@@ -689,6 +707,38 @@ RECURSOS: dict[str, dict[str, Any]] = {
         ],
         "somente_admin": False,
     },
+    "tabelas-preco-colheita": {
+        "titulo": "Tabelas de preço da colheita",
+        "modelo": TabelaPrecoColheita,
+        "formulario": TabelaPrecoColheitaForm,
+        "colunas": [
+            ("Empreiteiro", "fornecedor"),
+            ("Vigente de", "vigencia_inicio"),
+            ("Até", "vigencia_fim"),
+            ("Faixas", "quantidade_faixas"),
+            ("Observação", "observacao"),
+            ("Empresa", "empresa"),
+        ],
+        "busca": ["fornecedor__nome_razao_social", "observacao"],
+        "somente_admin": False,
+    },
+    "boletins-colheita": {
+        "titulo": "Boletins de medição",
+        "modelo": BoletimMedicao,
+        "formulario": BoletimMedicaoForm,
+        "colunas": [
+            ("Emissão", "data_emissao"),
+            ("Empreiteiro", "fornecedor"),
+            ("De", "periodo_inicio"),
+            ("Até", "periodo_fim"),
+            ("Situação", "get_status_display"),
+            ("Valor total (R$)", "valor_total"),
+            ("Empresa", "empresa"),
+        ],
+        "busca": ["fornecedor__nome_razao_social", "observacao"],
+        "somente_admin": False,
+        "abrir": "boletim_medicao",
+    },
     "transportes-lenha": {
         "titulo": "Transporte de lenha",
         "modelo": TransporteLenha,
@@ -711,6 +761,25 @@ RECURSOS: dict[str, dict[str, Any]] = {
             "empresa__razao_social",
         ],
         "somente_admin": False,
+    },
+    "boletins-transporte": {
+        "titulo": "Boletins de transporte",
+        "modelo": BoletimTransporte,
+        "formulario": BoletimTransporteForm,
+        "colunas": [
+            ("Emissão", "data_emissao"),
+            ("Transportadora", "fornecedor"),
+            ("De", "periodo_inicio"),
+            ("Até", "periodo_fim"),
+            ("Viagens", "total_viagens"),
+            ("Lenha (MST)", "total_mst"),
+            ("Líquido (R$)", "valor_liquido"),
+            ("Situação", "get_status_display"),
+            ("Empresa", "empresa"),
+        ],
+        "busca": ["fornecedor__nome_razao_social", "observacao"],
+        "somente_admin": False,
+        "abrir": "boletim_transporte",
     },
     "expedicoes": {
         "titulo": "Expedições de carvão",
@@ -1016,6 +1085,222 @@ def consolidado_colheita(request: HttpRequest) -> HttpResponse:
     )
     return render(
         request, "sistema/consolidado_colheita.html", {"consolidado": consolidado}
+    )
+
+
+@login_required
+def boletim_medicao(request: HttpRequest, pk: int) -> HttpResponse:
+    """Boletim para conferir, ajustar as áreas, fechar e imprimir."""
+    recurso = "boletins-colheita"
+    configuracao = _configurar_recurso(request, recurso)
+    boletim = get_object_or_404(_queryset_recurso(request, configuracao), pk=pk)
+    usuario = usuario_autenticado(request)
+    acao = request.POST.get("acao", "")
+    if request.method == "POST":
+        if _somente_consulta(request, configuracao):
+            return _recusar_empresa_encerrada(request, recurso)
+        if acao == "salvar" and boletim.editavel:
+            _ajustar_itens(request, boletim)
+            boletim.recalcular()
+            messages.success(request, "Boletim recalculado.")
+        elif acao == "fechar" and boletim.editavel:
+            boletim.recalcular()
+            boletim.status = StatusBoletim.FECHADO
+            boletim.usuario_alteracao = usuario
+            boletim.save(update_fields=["status", "usuario_alteracao"])
+            messages.success(request, "Boletim fechado.")
+        elif acao == "reabrir" and boletim.status == StatusBoletim.FECHADO:
+            boletim.status = StatusBoletim.ABERTO
+            boletim.save(update_fields=["status"])
+            messages.success(request, "Boletim reaberto para ajustes.")
+        return redirect("boletim_medicao", pk=boletim.pk)
+    parametros = Parametros.da_empresa(boletim.empresa)
+    linhas = _linhas_do_boletim(boletim, parametros)
+    return render(
+        request,
+        "sistema/boletim_medicao.html",
+        {
+            "boletim": boletim,
+            "linhas": linhas,
+            "etapas": [rotulo for _, _, rotulo in ETAPAS_DO_BOLETIM],
+            "inclinacoes": Inclinacao.choices,
+            "total_valor": formatar_numero(boletim.valor_total, parametros, 2),
+            "totais_volume": _totais_por_etapa(boletim, parametros),
+            "pode_editar": boletim.editavel
+            and not _somente_consulta(request, configuracao),
+        },
+    )
+
+
+def _ajustar_itens(request: HttpRequest, boletim: BoletimMedicao) -> None:
+    """Área, VMI e inclinação digitados em cada linha do boletim aberto."""
+    for item in boletim.itens.all():
+        for campo in ("area_ha", "vmi"):
+            texto = request.POST.get(f"{campo}_{item.pk}", "").replace(",", ".")
+            try:
+                valor = Decimal(texto) if texto else None
+            except ArithmeticError:
+                valor = None
+            if valor is not None and valor >= 0:
+                setattr(item, campo, valor)
+        inclinacao = request.POST.get(f"inclinacao_{item.pk}")
+        if inclinacao in Inclinacao.values:
+            item.inclinacao = inclinacao
+        item.save()
+
+
+def _linhas_do_boletim(boletim: BoletimMedicao, parametros: Parametros) -> list[dict]:
+    """Uma linha por talhão, com as três etapas lado a lado (como a planilha)."""
+    linhas: dict[int, dict] = {}
+    chaves = [etapa for etapa, _, _ in ETAPAS_DO_BOLETIM]
+    for item in boletim.itens.select_related("talhao__fazenda"):
+        linha = linhas.setdefault(
+            item.talhao_id,
+            {
+                "talhao": item.talhao,
+                "item": item,
+                "etapas": dict.fromkeys(chaves),
+                "valor": Decimal(0),
+            },
+        )
+        linha["etapas"][item.etapa] = {
+            "item": item,
+            "area": formatar_numero(item.area_ha, parametros, 4),
+            "volume": formatar_numero(item.volume_m3, parametros, 2),
+            "preco": (
+                formatar_numero(item.preco_m3, parametros, 2)
+                if item.preco_m3 is not None
+                else None
+            ),
+            "valor": formatar_numero(item.valor, parametros, 2),
+        }
+        linha["valor"] += item.valor
+    resultado = []
+    for linha in linhas.values():
+        item = linha["item"]
+        resultado.append(
+            {
+                **linha,
+                "etapas": [linha["etapas"][etapa] for etapa in chaves],
+                "valor": formatar_numero(linha["valor"], parametros, 2),
+                "vmi": formatar_numero(item.vmi, parametros, 2) if item.vmi else "—",
+                "area_total": formatar_numero(item.talhao.area_ha, parametros, 4),
+                "volume_ha": (
+                    formatar_numero(item.volume_inventario_ha, parametros, 2)
+                    if item.volume_inventario_ha
+                    else "—"
+                ),
+            }
+        )
+    return resultado
+
+
+def _totais_por_etapa(
+    boletim: BoletimMedicao, parametros: Parametros
+) -> list[dict[str, str]]:
+    totais = []
+    for etapa, _, _ in ETAPAS_DO_BOLETIM:
+        soma = boletim.itens.filter(etapa=etapa).aggregate(
+            volume=Sum("volume_m3"), valor=Sum("valor")
+        )
+        totais.append(
+            {
+                "volume": formatar_numero(soma["volume"] or 0, parametros, 2),
+                "valor": formatar_numero(soma["valor"] or 0, parametros, 2),
+            }
+        )
+    return totais
+
+
+@login_required
+def boletim_transporte(request: HttpRequest, pk: int) -> HttpResponse:
+    """Boletim do frete de lenha: conferir, tirar viagens, fechar e imprimir."""
+    recurso = "boletins-transporte"
+    configuracao = _configurar_recurso(request, recurso)
+    boletim = get_object_or_404(_queryset_recurso(request, configuracao), pk=pk)
+    if request.method == "POST":
+        if _somente_consulta(request, configuracao):
+            return _recusar_empresa_encerrada(request, recurso)
+        acao = request.POST.get("acao", "")
+        if acao == "remover" and boletim.editavel:
+            retirar = request.POST.getlist("retirar")
+            boletim.viagens.filter(pk__in=retirar).update(boletim=None)
+            boletim.recalcular()
+            messages.success(request, f"{len(retirar)} viagem(ns) retirada(s).")
+        elif acao == "fechar" and boletim.editavel:
+            boletim.recalcular()
+            boletim.status = StatusBoletim.FECHADO
+            boletim.usuario_alteracao = usuario_autenticado(request)
+            boletim.save(update_fields=["status", "usuario_alteracao"])
+            messages.success(request, "Boletim fechado.")
+        elif acao == "reabrir" and boletim.status == StatusBoletim.FECHADO:
+            boletim.status = StatusBoletim.ABERTO
+            boletim.save(update_fields=["status"])
+            messages.success(request, "Boletim reaberto para ajustes.")
+        return redirect("boletim_transporte", pk=boletim.pk)
+    parametros = Parametros.da_empresa(boletim.empresa)
+
+    def numero(valor: Decimal | None, casas: int) -> str:
+        return "—" if valor is None else formatar_numero(valor, parametros, casas)
+
+    viagens = boletim.viagens.select_related(
+        "talhao__fazenda", "upc", "box_lenha"
+    ).order_by("data_transporte", "codigo")
+    resumo: dict[int, dict] = {}
+    for viagem in viagens:
+        linha = resumo.setdefault(
+            viagem.talhao_id,
+            {
+                "talhao": viagem.talhao,
+                "viagens": 0,
+                "mst": Decimal(0),
+                "m3": Decimal(0),
+                "valor": Decimal(0),
+            },
+        )
+        linha["viagens"] += 1
+        linha["mst"] += viagem.volume_mst
+        linha["m3"] += viagem.volume_m3 or 0
+        linha["valor"] += viagem.valor_total or 0
+    volume = parametros.casas_decimais_volume
+    return render(
+        request,
+        "sistema/boletim_transporte.html",
+        {
+            "boletim": boletim,
+            "viagens": [
+                {
+                    "viagem": viagem,
+                    "mst": numero(viagem.volume_mst, volume),
+                    "m3": numero(viagem.volume_m3, volume),
+                    "preco": numero(viagem.valor_mst, 2),
+                    "valor": numero(viagem.valor_total, 2),
+                }
+                for viagem in viagens
+            ],
+            "resumo": [
+                {
+                    **linha,
+                    "mst": numero(linha["mst"], volume),
+                    "m3": numero(linha["m3"], volume),
+                    "valor": numero(linha["valor"], 2),
+                }
+                for linha in resumo.values()
+            ],
+            "total_m3": numero(
+                sum((linha["m3"] for linha in resumo.values()), Decimal(0)), volume
+            ),
+            "totais": {
+                "mst": numero(boletim.total_mst, volume),
+                "bruto": numero(boletim.valor_bruto, 2),
+                "desconto": numero(boletim.valor_desconto, 2),
+                "adiantamento": numero(boletim.valor_adiantamento, 2),
+                "liquido": numero(boletim.valor_liquido, 2),
+            },
+            "sem_valor": boletim.viagens_sem_valor(),
+            "pode_editar": boletim.editavel
+            and not _somente_consulta(request, configuracao),
+        },
     )
 
 
@@ -1390,6 +1675,7 @@ def lista_registros(request: HttpRequest, recurso: str) -> HttpResponse:
             "pagina": pagina,
             "termo": termo,
             "filtro": filtro,
+            "abrir": configuracao.get("abrir"),
             "local_no_menu": local_no_menu(recurso),
             "somente_leitura": _somente_consulta(request, configuracao),
             "consulta_de_encerrada": _somente_consulta(request, configuracao)
@@ -1564,7 +1850,7 @@ def etapa_do_ciclo(request: HttpRequest, etapa: str) -> HttpResponse:
 
 
 @login_required
-def formulario_registro(
+def formulario_registro(  # noqa: C901
     request: HttpRequest, recurso: str, pk: int | None = None
 ) -> HttpResponse:
     configuracao = _configurar_recurso(request, recurso)
@@ -1607,6 +1893,8 @@ def formulario_registro(
             registro.empresa = empresa_fixa
         _salvar_registro(formulario, registro, usuario)
         messages.success(request, f"{configuracao['titulo']}: registro salvo.")
+        if configuracao.get("abrir") and not proximo:
+            return redirect(configuracao["abrir"], pk=registro.pk)
         campo_origem = request.GET.get("campo", "")
         if proximo and campo_origem:
             proximo = _destino_com_selecao(proximo, campo_origem, registro.pk)

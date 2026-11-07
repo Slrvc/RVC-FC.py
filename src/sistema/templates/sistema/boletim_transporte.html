@@ -1,0 +1,121 @@
+{% extends "sistema/base.html" %}
+{% block title %}Boletim de transporte · {{ boletim.fornecedor }} · RVC-FC{% endblock %}
+{% block content %}
+  <div class="page-heading nao-imprimir">
+    <div>
+      <p class="eyebrow"><a href="{% url 'lista_registros' 'boletins-transporte' %}">Boletins de transporte</a></p>
+      <h1>Boletim de transporte · {{ boletim.data_emissao|date:"d/m/Y" }}</h1>
+      <p class="page-description">{{ boletim.fornecedor }} · viagens de {{ boletim.periodo_inicio|date:"d/m/Y" }} a {{ boletim.periodo_fim|date:"d/m/Y" }} · <strong>{{ boletim.get_status_display }}</strong></p>
+    </div>
+    <div class="heading-actions">
+      <a class="button button-secondary" href="{% url 'editar_registro' 'boletins-transporte' boletim.pk %}">Dados do boletim</a>
+      <button class="button button-secondary" type="button" onclick="window.print()">Imprimir</button>
+      {% if pode_editar %}
+        <button class="button" type="submit" form="form-boletim" name="acao" value="fechar">Fechar boletim</button>
+      {% elif boletim.status == "FECHADO" %}
+        <form method="post">{% csrf_token %}<button class="button button-secondary" type="submit" name="acao" value="reabrir">Reabrir</button></form>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if sem_valor %}
+    <div class="flash-message nao-imprimir" role="status">{{ sem_valor }} viagem(ns) sem valor: cadastre a tarifa de transporte de lenha da transportadora ou informe o R$/MST na viagem.</div>
+  {% endif %}
+
+  <form id="form-boletim" method="post">
+    {% csrf_token %}
+    <section class="panel boletim">
+      <header class="boletim-titulo">
+        <h2>Boletim de Medição – Transporte de Lenha · {{ boletim.fornecedor.nome_razao_social }}</h2>
+        <p>Viagens de {{ boletim.periodo_inicio|date:"d/m/Y" }} a {{ boletim.periodo_fim|date:"d/m/Y" }} · emissão {{ boletim.data_emissao|date:"d/m/Y" }}</p>
+      </header>
+
+      <div class="boletim-resumo">
+        <div class="table-wrap">
+          <table class="boletim-tabela tabela-numeros">
+            <thead>
+              <tr><th scope="col">Talhão</th><th scope="col">Fazenda</th><th scope="col">Viagens</th><th scope="col">MST</th><th scope="col">m³</th><th scope="col">Valor (R$)</th></tr>
+            </thead>
+            <tbody>
+              {% for linha in resumo %}
+                <tr><th scope="row">{{ linha.talhao.identificacao }}</th><td class="texto">{{ linha.talhao.fazenda.nome_curto }}</td><td>{{ linha.viagens }}</td><td>{{ linha.mst }}</td><td>{{ linha.m3 }}</td><td>{{ linha.valor }}</td></tr>
+              {% endfor %}
+            </tbody>
+            <tfoot>
+              <tr class="grade-total"><th scope="row" colspan="2">TOTAL</th><td>{{ boletim.total_viagens }}</td><td>{{ totais.mst }}</td><td>{{ total_m3 }}</td><td>{{ totais.bruto }}</td></tr>
+            </tfoot>
+          </table>
+        </div>
+        <table class="boletim-tabela tabela-numeros boletim-totais">
+          <tbody>
+            <tr><th scope="row">Valor das viagens</th><td>R$ {{ totais.bruto }}</td></tr>
+            <tr><th scope="row">(−) Desconto{% if boletim.motivo_desconto %} <small>{{ boletim.motivo_desconto }}</small>{% endif %}</th><td>R$ {{ totais.desconto }}</td></tr>
+            <tr><th scope="row">(−) Adiantamento</th><td>R$ {{ totais.adiantamento }}</td></tr>
+            <tr class="grade-total"><th scope="row">Líquido a pagar</th><td><strong>R$ {{ totais.liquido }}</strong></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 class="boletim-subtitulo">Viagens</h3>
+      <div class="table-wrap">
+        <table class="boletim-tabela tabela-numeros">
+          <thead>
+            <tr>
+              {% if pode_editar %}<th scope="col" class="nao-imprimir">Tirar</th>{% endif %}
+              <th scope="col">Data</th>
+              <th scope="col">Documento</th>
+              <th scope="col">Placa</th>
+              <th scope="col">Motorista</th>
+              <th scope="col">Talhão</th>
+              <th scope="col">Destino</th>
+              <th scope="col">MST</th>
+              <th scope="col">m³</th>
+              <th scope="col">R$/MST</th>
+              <th scope="col">Valor (R$)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for linha in viagens %}
+              <tr>
+                {% if pode_editar %}<td class="nao-imprimir"><input type="checkbox" name="retirar" value="{{ linha.viagem.pk }}" aria-label="Tirar a viagem {{ linha.viagem.numero_documento }} do boletim"></td>{% endif %}
+                <td>{{ linha.viagem.data_transporte|date:"d/m/Y" }}</td>
+                <td class="texto">{{ linha.viagem.numero_documento|default:"—" }}</td>
+                <td class="texto">{{ linha.viagem.placa_veiculo|default:"—" }}</td>
+                <td class="texto">{{ linha.viagem.motorista|default:"—" }}</td>
+                <td class="texto">{{ linha.viagem.talhao.identificacao }}</td>
+                <td class="texto">{% if linha.viagem.box_lenha %}Box {{ linha.viagem.box_lenha.numero }}{% else %}{{ linha.viagem.get_destino_display }}{% endif %}</td>
+                <td>{{ linha.mst }}</td>
+                <td>{{ linha.m3 }}</td>
+                <td>{{ linha.preco }}</td>
+                <td>{{ linha.valor }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="boletim-assinaturas">
+        <p class="boletim-elaborado">Elaborado por: {{ boletim.elaborado_por }}</p>
+        <div class="assinatura">
+          <span class="linha-assinatura"></span>
+          <strong>{{ boletim.fornecedor.nome_razao_social|upper }}</strong>
+          <small>{{ boletim.fornecedor.cpf_cnpj }}</small>
+        </div>
+        <div class="assinatura">
+          <span class="linha-assinatura"></span>
+          <strong>{{ boletim.empresa.razao_social|upper }}</strong>
+          <small>{{ boletim.empresa.cnpj }}</small>
+        </div>
+        <p class="boletim-validacao">A empresa {{ boletim.empresa.razao_social|upper }} por meio de seu preposto/representante legal valida, na data indicada abaixo, as viagens constantes no presente Boletim de Medição.</p>
+        <p class="boletim-elaborado">Validado por: {{ boletim.validado_por }}</p>
+        <p class="boletim-local">{{ boletim.empresa.municipio.nome|default:"" }}, {{ boletim.data_emissao|date:"j" }} de {{ boletim.data_emissao|date:"F"|lower }} de {{ boletim.data_emissao|date:"Y" }}</p>
+      </div>
+    </section>
+    {% if pode_editar %}
+      <div class="form-actions nao-imprimir">
+        <button class="button button-secondary" type="submit" name="acao" value="remover">Tirar as viagens marcadas</button>
+        <span class="help-text">As viagens tiradas voltam a ficar livres para outro boletim. Desconto e adiantamento ficam em "Dados do boletim".</span>
+      </div>
+    {% endif %}
+  </form>
+{% endblock %}
